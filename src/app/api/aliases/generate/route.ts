@@ -166,36 +166,34 @@ export async function POST(req: NextRequest) {
     if (clientSettings.mode === "live" && apiKey) {
       const client = new SimpleLoginClient(apiKey, clientSettings.apiBaseUrl);
 
-      // Fetch fresh signed_suffix options if using custom_prefix
+      // Fetch fresh signed_suffix options for the chosen domainSuffix
       let signedSuffixToUse =
         clientSettings.availableSuffixes.find((s) => s.suffix === domainSuffix)
           ?.signed_suffix || clientSettings.defaultSignedSuffix;
 
-      if (generationMode === "custom_prefix") {
-        try {
-          const freshOptions = await client.getAliasOptions();
-          if (!freshOptions.can_create) {
-            throw new SimpleLoginApiError(
-              "SimpleLogin reported can_create=false (account alias quota reached).",
-              403
-            );
-          }
-          const matched =
-            freshOptions.suffixes.find((s) => s.suffix === domainSuffix) ||
-            freshOptions.suffixes[0];
-          if (matched) {
-            signedSuffixToUse = matched.signed_suffix;
-          }
-        } catch (err) {
-          if (err instanceof SimpleLoginApiError) {
-            await dbQuery(
-              `UPDATE generation_batches
-               SET status = 'failed', failed_count = $1, error_summary = $2, completed_at = NOW()
-               WHERE id = $3`,
-              [requestedCount, err.message, batchId]
-            );
-            return NextResponse.json({ error: err.message }, { status: err.status });
-          }
+      try {
+        const freshOptions = await client.getAliasOptions();
+        if (!freshOptions.can_create) {
+          throw new SimpleLoginApiError(
+            "SimpleLogin reported can_create=false (account alias quota reached).",
+            403
+          );
+        }
+        const matched =
+          freshOptions.suffixes.find((s) => s.suffix === domainSuffix) ||
+          freshOptions.suffixes[0];
+        if (matched) {
+          signedSuffixToUse = matched.signed_suffix;
+        }
+      } catch (err) {
+        if (err instanceof SimpleLoginApiError) {
+          await dbQuery(
+            `UPDATE generation_batches
+             SET status = 'failed', failed_count = $1, error_summary = $2, completed_at = NOW()
+             WHERE id = $3`,
+            [requestedCount, err.message, batchId]
+          );
+          return NextResponse.json({ error: err.message }, { status: err.status });
         }
       }
 

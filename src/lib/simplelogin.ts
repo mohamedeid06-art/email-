@@ -316,7 +316,7 @@ export class SimpleLoginClient {
  * while honoring exact SimpleLogin suffix and prefix conventions.
  */
 export function generateSandboxAliasAddress(params: {
-  mode: "random_word" | "random_uuid" | "custom_prefix";
+  mode: "random_word" | "random_uuid" | "custom_prefix" | "numeric_dot";
   prefixPattern?: string;
   domainSuffix: string;
   index: number;
@@ -328,9 +328,11 @@ export function generateSandboxAliasAddress(params: {
   const randToken = crypto.randomBytes(3).toString("hex").slice(0, 5);
   let prefix = "";
 
-  if (params.mode === "random_uuid") {
-    const uuidShort = crypto.randomUUID().split("-").slice(0, 3).join("-");
-    prefix = `sl.${uuidShort}`;
+  if (params.mode === "numeric_dot" || params.mode === "random_uuid") {
+    // Format: a45286444.6171425682@smsmraw.com (letter + 8-9 digits + . + 10 digits)
+    const part1 = Math.floor(10000000 + Math.random() * 90000000);
+    const part2 = Math.floor(1000000000 + Math.random() * 9000000000);
+    prefix = `a${part1}.${part2}`;
   } else if (params.mode === "custom_prefix" && params.prefixPattern?.trim()) {
     const sanitizedBase = params.prefixPattern
       .trim()

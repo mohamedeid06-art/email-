@@ -35,8 +35,20 @@ const dbState = globalForDb.__bulkAliasDb;
 
 const DEFAULT_SANDBOX_SUFFIXES: SimpleLoginSuffix[] = [
   {
+    suffix: "@smsmraw.com",
+    signed_suffix: "sl_sig_smsmraw.com.v5.verified",
+    is_custom: true,
+    is_premium: false,
+  },
+  {
     suffix: "@simplelogin.com",
     signed_suffix: "sl_sig_simplelogin.com.v5.verified",
+    is_custom: false,
+    is_premium: false,
+  },
+  {
+    suffix: "@passmail.net",
+    signed_suffix: "sl_sig_passmail.net.v5.verified",
     is_custom: false,
     is_premium: false,
   },
@@ -58,30 +70,16 @@ const DEFAULT_SANDBOX_SUFFIXES: SimpleLoginSuffix[] = [
     is_custom: false,
     is_premium: true,
   },
-  {
-    suffix: "@passmail.net",
-    signed_suffix: "sl_sig_passmail.net.v5.verified",
-    is_custom: false,
-    is_premium: false,
-  },
 ];
 
 const DEFAULT_SANDBOX_MAILBOXES: SimpleLoginMailbox[] = [
   {
     id: 10421,
-    email: "ops-primary@proton.me",
+    email: "mhmdsamy112233@gmail.com",
     default: true,
     verified: true,
     nb_alias: 0,
     creation_timestamp: 1731200000,
-  },
-  {
-    id: 10422,
-    email: "security-team@company.io",
-    default: false,
-    verified: true,
-    nb_alias: 0,
-    creation_timestamp: 1732500000,
   },
 ];
 
