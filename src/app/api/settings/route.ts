@@ -210,6 +210,9 @@ export async function POST(req: NextRequest) {
           ]
         );
 
+        // Remove any old sandbox/demo aliases when connecting Live SimpleLogin API
+        await dbQuery("DELETE FROM aliases WHERE provider_mode = 'sandbox'");
+
         liveVerified = true;
         connectionMessage = `Connected to SimpleLogin as ${userInfo.email} (${
           userInfo.is_premium

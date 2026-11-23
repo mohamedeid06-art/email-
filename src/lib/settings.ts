@@ -135,12 +135,9 @@ export async function getServerProviderSettings(): Promise<ServerProviderSetting
 }
 
 export async function seedInitialAliasesIfEmpty(): Promise<void> {
-  const countRes = await dbQuery<{ count: number }>(
-    "SELECT COUNT(*)::int AS count FROM aliases"
-  );
-  if (Number(countRes.rows[0]?.count || 0) > 0) {
-    return;
-  }
+  // No-op: Do not auto-seed demo aliases so the table starts clean and deleted aliases never reappear.
+  return;
+}
 
   const batchId = "batch_seed_initial";
   await dbQuery(

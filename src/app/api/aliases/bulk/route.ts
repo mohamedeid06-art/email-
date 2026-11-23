@@ -11,11 +11,25 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { ids, action, primaryEmail, mailboxId } = body as {
-      ids: number[];
-      action: "enable" | "disable" | "delete" | "update_forwarding";
+      ids?: number[];
+      action: "enable" | "disable" | "delete" | "update_forwarding" | "clear_all";
       primaryEmail?: string;
       mailboxId?: number;
     };
+
+    if (action === "clear_all") {
+      await dbQuery("DELETE FROM aliases");
+      const [stats, updatedSettings] = await Promise.all([
+        getDashboardStats(),
+        getServerProviderSettings(),
+      ]);
+      return NextResponse.json({
+        processedCount: 0,
+        errors: [],
+        stats,
+        settings: updatedSettings.clientSettings,
+      });
+    }
 
     if (!Array.isArray(ids) || ids.length === 0) {
       return NextResponse.json(
