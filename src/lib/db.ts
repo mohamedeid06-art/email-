@@ -1,4 +1,5 @@
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { Pool } from "pg";
 import { PGlite } from "@electric-sql/pglite";
@@ -105,15 +106,94 @@ async function initializeDatabase(): Promise<void> {
   }
 
   if (!dbState.pgPool && !dbState.pglite) {
-    const dataDir = path.join(process.cwd(), "data", "postgres");
-    fs.mkdirSync(dataDir, { recursive: true });
-    dbState.pglite = new PGlite(dataDir);
-    await dbState.pglite.waitReady;
-    dbState.engineLabel = "PostgreSQL 16 (Persistent Local Cluster)";
+    try {
+      const baseDir = process.env.VERCEL
+        ? path.join(os.tmpdir(), "bulk-alias-manager")
+        : path.join(process.cwd(), "data");
+      const dataDir = path.join(baseDir, "postgres");
+      fs.mkdirSync(dataDir, { recursive: true });
+      dbState.pglite = new PGlite(dataDir);
+      await dbState.pglite.waitReady;
+      dbState.engineLabel = "PostgreSQL 16 (Persistent Cluster)";
+    } catch {
+      dbState.pglite = new PGlite();
+      await dbState.pglite.waitReady;
+      dbState.engineLabel = "PostgreSQL 16 (Serverless Cluster)";
+    }
   }
 
   const schemaPath = path.join(process.cwd(), "db", "schema.sql");
-  const schemaSql = fs.readFileSync(schemaPath, "utf8");
+  const schemaSql = fs.existsSync(schemaPath)
+    ? fs.readFileSync(schemaPath, "utf8")
+    : `
+CREATE TABLE IF NOT EXISTS provider_settings (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  api_base_url TEXT NOT NULL DEFAULT 'https://app.simplelogin.io',
+  encrypted_api_key TEXT,
+  api_key_preview TEXT,
+  mode TEXT NOT NULL DEFAULT 'live',
+  primary_email TEXT NOT NULL DEFAULT '',
+  default_mailbox_id INTEGER,
+  default_suffix TEXT,
+  default_signed_suffix TEXT,
+  account_name TEXT,
+  account_email TEXT,
+  is_premium BOOLEAN NOT NULL DEFAULT FALSE,
+  in_trial BOOLEAN NOT NULL DEFAULT FALSE,
+  max_alias_free_plan INTEGER NOT NULL DEFAULT 10,
+  can_create BOOLEAN NOT NULL DEFAULT TRUE,
+  available_suffixes JSONB NOT NULL DEFAULT '[]'::jsonb,
+  available_mailboxes JSONB NOT NULL DEFAULT '[]'::jsonb,
+  last_synced_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT single_row CHECK (id = 1)
+);
+CREATE TABLE IF NOT EXISTS generation_batches (
+  id TEXT PRIMARY KEY,
+  requested_count INTEGER NOT NULL,
+  created_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  primary_email TEXT NOT NULL,
+  mailbox_id INTEGER,
+  generation_mode TEXT NOT NULL,
+  prefix_pattern TEXT,
+  domain_suffix TEXT,
+  note TEXT,
+  status TEXT NOT NULL DEFAULT 'running',
+  error_summary TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS aliases (
+  id SERIAL PRIMARY KEY,
+  remote_alias_id INTEGER UNIQUE,
+  email TEXT NOT NULL UNIQUE,
+  prefix TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  primary_email TEXT NOT NULL,
+  mailbox_id INTEGER,
+  mailboxes JSONB NOT NULL DEFAULT '[]'::jsonb,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  creation_status TEXT NOT NULL DEFAULT 'active',
+  forwarding_status TEXT NOT NULL DEFAULT 'configured',
+  note TEXT DEFAULT '',
+  display_name TEXT DEFAULT '',
+  batch_id TEXT REFERENCES generation_batches(id) ON DELETE SET NULL,
+  nb_forward INTEGER NOT NULL DEFAULT 0,
+  nb_reply INTEGER NOT NULL DEFAULT 0,
+  nb_block INTEGER NOT NULL DEFAULT 0,
+  pinned BOOLEAN NOT NULL DEFAULT FALSE,
+  provider_mode TEXT NOT NULL DEFAULT 'live',
+  error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_aliases_email ON aliases (email);
+CREATE INDEX IF NOT EXISTS idx_aliases_primary_email ON aliases (primary_email);
+CREATE INDEX IF NOT EXISTS idx_aliases_enabled ON aliases (enabled);
+CREATE INDEX IF NOT EXISTS idx_aliases_batch_id ON aliases (batch_id);
+CREATE INDEX IF NOT EXISTS idx_aliases_created_at ON aliases (created_at DESC);
+`;
 
   if (dbState.pgPool) {
     await dbState.pgPool.query(schemaSql);
