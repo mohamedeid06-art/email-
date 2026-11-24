@@ -3,6 +3,15 @@ export interface CloudflareAuth {
   authEmail?: string | null;
 }
 
+export interface CloudflareRoutingRule {
+  id: string;
+  tag?: string;
+  name: string;
+  enabled: boolean;
+  targetAliasEmail: string | null;
+  destinationEmail: string | null;
+}
+
 const zoneCache = new Map<string, { zoneId: string; accountId: string; cachedAt: number }>();
 let authLockoutUntil = 0;
 
@@ -67,8 +76,6 @@ async function cfFetch(url: string, auth: CloudflareAuth, init: RequestInit = {}
     return { ok: false, status: 400, data: {}, errorMessage: preCheckError };
   }
 
-  // Cloudflare Global API Keys either start with `cfk_` (modern format) or are 37-char hex strings (legacy format).
-  // Both MUST be authenticated using X-Auth-Email + X-Auth-Key headers!
   const useGlobalKeyHeader = isCloudflareGlobalApiKey(t);
 
   const authHeaders: Record<string, string> = useGlobalKeyHeader
@@ -231,4 +238,153 @@ export async function updateCloudflareCatchAll(
     );
   }
   return cleanDest;
+}
+
+export async function listCloudflareRoutingRules(
+  auth: CloudflareAuth,
+  zoneId: string
+): Promise<CloudflareRoutingRule[]> {
+  const allRules: CloudflareRoutingRule[] = [];
+  for (let page = 1; page <= 4; page++) {
+    const { ok, data } = await cfFetch(
+      `https://api.cloudflare.com/client/v4/zones/${zoneId}/email/routing/rules?per_page=50&page=${page}`,
+      auth
+    );
+    if (!ok) break;
+    const rawList = (data.result as Array<Record<string, unknown>>) || [];
+    if (rawList.length === 0) break;
+
+    for (const r of rawList) {
+      const matchers = (r.matchers as Array<{ type?: string; field?: string; value?: string }>) || [];
+      const actions = (r.actions as Array<{ type?: string; value?: string[] }>) || [];
+      const toMatcher = matchers.find((m) => m.type === "literal" && m.field === "to");
+      const fwdAction = actions.find((a) => a.type === "forward");
+      if (toMatcher?.value) {
+        allRules.push({
+          id: String(r.id || r.tag || ""),
+          tag: r.tag ? String(r.tag) : undefined,
+          name: String(r.name || ""),
+          enabled: Boolean(r.enabled),
+          targetAliasEmail: toMatcher.value.toLowerCase().trim(),
+          destinationEmail: fwdAction?.value?.[0]?.toLowerCase().trim() || null,
+        });
+      }
+    }
+    if (rawList.length < 50) break;
+  }
+  return allRules;
+}
+
+/**
+ * Creates or updates dedicated Cloudflare Custom Routing Rules so each alias
+ * permanently forwards its OTPs to its assigned Gmail address, even after Catch-All is switched!
+ */
+export async function syncCloudflareCustomRulesForAliases(
+  auth: CloudflareAuth,
+  zoneId: string,
+  items: Array<{ email: string; destinationEmail: string }>
+): Promise<{ pinnedCount: number; failedCount: number }> {
+  if (!items.length) return { pinnedCount: 0, failedCount: 0 };
+
+  const existingRules = await listCloudflareRoutingRules(auth, zoneId);
+  const ruleByAlias = new Map<string, CloudflareRoutingRule>();
+  for (const r of existingRules) {
+    if (r.targetAliasEmail) {
+      ruleByAlias.set(r.targetAliasEmail, r);
+    }
+  }
+
+  let pinnedCount = 0;
+  let failedCount = 0;
+  const CHUNK_SIZE = 10;
+
+  for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+    const chunk = items.slice(i, i + CHUNK_SIZE);
+    await Promise.all(
+      chunk.map(async (item) => {
+        const cleanAlias = item.email.trim().toLowerCase();
+        const cleanDest = item.destinationEmail.trim();
+        const existing = ruleByAlias.get(cleanAlias);
+
+        if (existing) {
+          if (existing.destinationEmail === cleanDest.toLowerCase() && existing.enabled) {
+            pinnedCount++;
+            return;
+          }
+          const ruleId = existing.id || existing.tag;
+          const { ok } = await cfFetch(
+            `https://api.cloudflare.com/client/v4/zones/${zoneId}/email/routing/rules/${ruleId}`,
+            auth,
+            {
+              method: "PUT",
+              body: JSON.stringify({
+                actions: [{ type: "forward", value: [cleanDest] }],
+                enabled: true,
+                matchers: [{ field: "to", type: "literal", value: cleanAlias }],
+                name: `SMSMRAW Pin: ${cleanAlias} -> ${cleanDest}`,
+                priority: 0,
+              }),
+            }
+          );
+          if (ok) pinnedCount++;
+          else failedCount++;
+        } else {
+          const { ok } = await cfFetch(
+            `https://api.cloudflare.com/client/v4/zones/${zoneId}/email/routing/rules`,
+            auth,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                actions: [{ type: "forward", value: [cleanDest] }],
+                enabled: true,
+                matchers: [{ field: "to", type: "literal", value: cleanAlias }],
+                name: `SMSMRAW Pin: ${cleanAlias} -> ${cleanDest}`,
+                priority: 0,
+              }),
+            }
+          );
+          if (ok) pinnedCount++;
+          else failedCount++;
+        }
+      })
+    );
+  }
+
+  return { pinnedCount, failedCount };
+}
+
+export async function deleteCloudflareCustomRulesForAliases(
+  auth: CloudflareAuth,
+  zoneId: string,
+  emailsToDelete?: string[]
+): Promise<number> {
+  const existingRules = await listCloudflareRoutingRules(auth, zoneId);
+  const targetSet = emailsToDelete
+    ? new Set(emailsToDelete.map((e) => e.trim().toLowerCase()))
+    : null;
+
+  const rulesToRemove = existingRules.filter((r) => {
+    if (!r.targetAliasEmail) return false;
+    if (targetSet) return targetSet.has(r.targetAliasEmail);
+    return r.name.startsWith("SMSMRAW Pin:") || r.targetAliasEmail.endsWith("@smsmraw.com");
+  });
+
+  let deleted = 0;
+  const CHUNK_SIZE = 10;
+  for (let i = 0; i < rulesToRemove.length; i += CHUNK_SIZE) {
+    const chunk = rulesToRemove.slice(i, i + CHUNK_SIZE);
+    await Promise.all(
+      chunk.map(async (r) => {
+        const ruleId = r.id || r.tag;
+        if (!ruleId) return;
+        const { ok } = await cfFetch(
+          `https://api.cloudflare.com/client/v4/zones/${zoneId}/email/routing/rules/${ruleId}`,
+          auth,
+          { method: "DELETE" }
+        );
+        if (ok) deleted++;
+      })
+    );
+  }
+  return deleted;
 }

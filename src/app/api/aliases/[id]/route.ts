@@ -1,4 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  deleteCloudflareCustomRulesForAliases,
+  findCloudflareZone,
+  syncCloudflareCustomRulesForAliases,
+} from "@/lib/cloudflare";
 import { dbQuery, getDashboardStats, mapAliasRow } from "@/lib/db";
 import { getServerProviderSettings } from "@/lib/settings";
 
@@ -93,6 +98,24 @@ export async function PATCH(
       getServerProviderSettings(),
     ]);
 
+    if (
+      primaryEmail !== undefined &&
+      nextEmail.toLowerCase() !== existing.primaryEmail.toLowerCase() &&
+      updated.cloudflareKey
+    ) {
+      try {
+        const { zoneId } = await findCloudflareZone(
+          { token: updated.cloudflareKey, authEmail: updated.cloudflareEmail },
+          "smsmraw.com"
+        );
+        await syncCloudflareCustomRulesForAliases(
+          { token: updated.cloudflareKey, authEmail: updated.cloudflareEmail },
+          zoneId,
+          [{ email: existing.email, destinationEmail: nextEmail }]
+        );
+      } catch {}
+    }
+
     return NextResponse.json({
       alias: mapAliasRow(updateRes.rows[0]),
       stats,
@@ -115,11 +138,31 @@ export async function DELETE(
   try {
     const { id } = await context.params;
     const aliasId = parseInt(id, 10);
+    const existingRes = await dbQuery<{ email: string }>(
+      "SELECT email FROM aliases WHERE id = $1",
+      [aliasId]
+    );
     await dbQuery("DELETE FROM aliases WHERE id = $1", [aliasId]);
+
     const [stats, updated] = await Promise.all([
       getDashboardStats(),
       getServerProviderSettings(),
     ]);
+
+    if (existingRes.rows[0]?.email && updated.cloudflareKey) {
+      try {
+        const { zoneId } = await findCloudflareZone(
+          { token: updated.cloudflareKey, authEmail: updated.cloudflareEmail },
+          "smsmraw.com"
+        );
+        await deleteCloudflareCustomRulesForAliases(
+          { token: updated.cloudflareKey, authEmail: updated.cloudflareEmail },
+          zoneId,
+          [existingRes.rows[0].email]
+        );
+      } catch {}
+    }
+
     return NextResponse.json({
       deletedId: aliasId,
       stats,

@@ -560,7 +560,10 @@ export default function BulkEmailAliasDashboard() {
     showToast("✅ تم حفظ الملاحظة والتصنيف.");
   }
 
-  async function handleSwitchReceiver(targetEmail: string) {
+  async function handleSwitchReceiver(
+    targetEmail: string,
+    moveExistingToo = false
+  ) {
     setSwitchingReceiver(true);
     try {
       const res = await fetch("/api/settings", {
@@ -568,7 +571,7 @@ export default function BulkEmailAliasDashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           switchActiveReceiver: targetEmail,
-          updateExistingAliasesToReceiver: true,
+          updateExistingAliasesToReceiver: moveExistingToo,
         }),
       });
       const d = await res.json();
@@ -581,10 +584,34 @@ export default function BulkEmailAliasDashboard() {
       await fetchAliases();
       showToast(
         d.message ||
-          `✅ تم تحويل استقبال الـ OTP في Cloudflare إلى ${targetEmail}`
+          `✅ تم تفعيل (${targetEmail}) للدفعات الجديدة مع بقاء الدفعات السابقة مثبتة على إيميلها!`
       );
     } catch (err) {
       showToast(err instanceof Error ? err.message : "فشل التبديل", "error");
+    } finally {
+      setSwitchingReceiver(false);
+    }
+  }
+
+  async function handlePinBatchToCloudflare(idsToPin?: number[]) {
+    setSwitchingReceiver(true);
+    try {
+      const res = await fetch("/api/aliases/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "pin_to_cloudflare",
+          ids: idsToPin,
+        }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || "فشل تثبيت الدفعة في Cloudflare");
+      await fetchAliases();
+      showToast(
+        `🔒 تم تثبيت ${d.pinnedCount || d.processedCount} إيميل نهائياً في Cloudflare على إيميل الاستقبال الخاص بكل منها!`
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "فشل التثبيت", "error");
     } finally {
       setSwitchingReceiver(false);
     }
@@ -668,7 +695,7 @@ export default function BulkEmailAliasDashboard() {
       await fetchAliases();
       if (activeTab === "studio") setActiveTab("dashboard");
       showToast(
-        `🎉 تم توليد ${d.createdCount} إيميل جديد بنجاح على ${domainSuffix}!`
+        `🔒 تم توليد ${d.createdCount} إيميل وتثبيتها نهائياً على (${primaryEmailInput}) في Cloudflare! حتى لو غيّرت الإيميل لاحقاً لعمل دفعة جديدة، ستظل هذه الدفعة تستلم الـ OTP على هذا الإيميل.`
       );
     } catch (err) {
       showToast(
@@ -2344,6 +2371,17 @@ export default function BulkEmailAliasDashboard() {
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
+                        disabled={switchingReceiver}
+                        onClick={() => handlePinBatchToCloudflare()}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-500/40 bg-indigo-500/15 px-3 py-2 text-xs font-extrabold text-indigo-200 hover:bg-indigo-500/25 disabled:opacity-50"
+                        title="تثبيت كل إيميل في الجدول على إيميل الاستقبال المكتوب أمامه في Cloudflare بشكل مستقل"
+                      >
+                        <ShieldCheck className="h-3.5 w-3.5 text-indigo-400" />
+                        <span>🔒 تثبيت الدفعات على إيميلاتها</span>
+                      </button>
+
+                      <button
+                        type="button"
                         onClick={() => handleCopyBulkUnused(10, false)}
                         className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-bold text-slate-200 hover:bg-white/10"
                         title="نسخ أول 10 إيميلات غير مستخدمة كقائمة نصية"
@@ -2611,10 +2649,11 @@ export default function BulkEmailAliasDashboard() {
                                 <td className="px-3 py-3">
                                   <span
                                     dir="ltr"
-                                    className="inline-flex items-center gap-1 font-mono text-[11px] text-slate-300"
+                                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 font-mono text-[11px] font-bold text-emerald-300"
+                                    title="مثبت نهائياً في Cloudflare ليستلم الـ OTP على هذا الإيميل حتى لو غيرت المستلم لدفعة أخرى"
                                   >
-                                    <ArrowLeft className="h-3 w-3 text-emerald-400" />
-                                    {a.primaryEmail}
+                                    <span>🔒</span>
+                                    <span>{a.primaryEmail}</span>
                                   </span>
                                 </td>
 

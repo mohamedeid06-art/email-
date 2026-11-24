@@ -375,13 +375,16 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      if (updateExistingAliasesToReceiver !== false) {
+      if (updateExistingAliasesToReceiver === true) {
         await dbQuery(
           "UPDATE aliases SET primary_email = $1, updated_at = NOW() WHERE domain = 'smsmraw.com'",
           [targetReceiver]
         );
       }
-      connectionMessage = `✅ تم التبديل فعلياً داخل Cloudflare! جميع أكواد الـ OTP المرسلة إلى @smsmraw.com تصل الآن إلى: ${targetReceiver}`;
+      connectionMessage =
+        updateExistingAliasesToReceiver === true
+          ? `✅ تم التبديل وتحويل جميع الإيميلات القديمة والجديدة لتستلم الـ OTP على: ${targetReceiver}`
+          : `✅ تم تفعيل (${targetReceiver}) للدفعات الجديدة! (الدفعات السابقة المثبتة تظل تستلم الـ OTP على إيميلها الأصلي بشكل مستقل).`;
     }
 
     const matchedMb =

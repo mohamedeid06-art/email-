@@ -1,6 +1,10 @@
 import crypto from "crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { findCloudflareZone, updateCloudflareCatchAll } from "@/lib/cloudflare";
+import {
+  findCloudflareZone,
+  syncCloudflareCustomRulesForAliases,
+  updateCloudflareCatchAll,
+} from "@/lib/cloudflare";
 import { dbQuery, getDashboardStats, mapAliasRow, mapBatchRow } from "@/lib/db";
 import { getServerProviderSettings } from "@/lib/settings";
 import { generateSandboxAliasAddress } from "@/lib/simplelogin";
@@ -18,6 +22,7 @@ export async function POST(req: NextRequest) {
       domainSuffix = "@smsmraw.com",
       note = "",
       displayName = "",
+      pinToCloudflare = true,
     } = body as {
       count: number;
       primaryEmail?: string;
@@ -27,6 +32,7 @@ export async function POST(req: NextRequest) {
       domainSuffix?: string;
       note?: string;
       displayName?: string;
+      pinToCloudflare?: boolean;
     };
 
     const requestedCount = Math.min(500, Math.max(1, Number(count) || 10));
@@ -73,19 +79,6 @@ export async function POST(req: NextRequest) {
         "UPDATE provider_settings SET primary_email = $1, available_mailboxes = $2::jsonb, updated_at = NOW() WHERE id = 1",
         [targetEmail, JSON.stringify(mbs)]
       );
-      if (cloudflareKey && cleanSuffix.toLowerCase().includes("smsmraw.com")) {
-        try {
-          const { zoneId } = await findCloudflareZone(
-            { token: cloudflareKey, authEmail: cloudflareEmail },
-            "smsmraw.com"
-          );
-          await updateCloudflareCatchAll(
-            { token: cloudflareKey, authEmail: cloudflareEmail },
-            zoneId,
-            targetEmail
-          );
-        } catch {}
-      }
     }
 
     const resolvedMbId = mailboxId ?? clientSettings.defaultMailboxId ?? 10421;
@@ -115,7 +108,6 @@ export async function POST(req: NextRequest) {
       ]
     );
 
-    // Fast multi-row bulk insert without any duplicate remote_alias_id collision!
     const valuePlaceholders: string[] = [];
     const insertParams: unknown[] = [];
     const seenEmails = new Set<string>();
@@ -175,6 +167,40 @@ export async function POST(req: NextRequest) {
     const createdAliases: AliasRecord[] = insertRes.rows.map(mapAliasRow);
     const createdCount = createdAliases.length;
 
+    let cloudflarePinnedCount = 0;
+    if (
+      cloudflareKey &&
+      cleanSuffix.toLowerCase().includes("smsmraw.com")
+    ) {
+      try {
+        const { zoneId } = await findCloudflareZone(
+          { token: cloudflareKey, authEmail: cloudflareEmail },
+          "smsmraw.com"
+        );
+        // Set Catch-All to current receiver as fallback
+        await updateCloudflareCatchAll(
+          { token: cloudflareKey, authEmail: cloudflareEmail },
+          zoneId,
+          targetEmail
+        ).catch(() => {});
+
+        // Also create dedicated per-alias Custom Routing Rules in Cloudflare
+        // so this batch remains permanently bound to targetEmail even after switching receivers later!
+        if (pinToCloudflare && createdAliases.length > 0) {
+          const toPin = createdAliases.slice(0, 100).map((a) => ({
+            email: a.email,
+            destinationEmail: targetEmail,
+          }));
+          const pinRes = await syncCloudflareCustomRulesForAliases(
+            { token: cloudflareKey, authEmail: cloudflareEmail },
+            zoneId,
+            toPin
+          );
+          cloudflarePinnedCount = pinRes.pinnedCount;
+        }
+      } catch {}
+    }
+
     const batchRes = await dbQuery<Record<string, unknown>>(
       `UPDATE generation_batches
        SET created_count = $1, failed_count = 0, status = 'completed', completed_at = NOW()
@@ -192,6 +218,7 @@ export async function POST(req: NextRequest) {
       batch: batchRes.rows[0] ? mapBatchRow(batchRes.rows[0]) : null,
       createdAliases,
       createdCount,
+      cloudflarePinnedCount,
       failedCount: 0,
       errors: [],
       settings: updatedSettings.clientSettings,
