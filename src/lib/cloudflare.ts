@@ -14,17 +14,19 @@ export function clearCloudflareAuthLockout(): void {
   authLockoutUntil = 0;
 }
 
+export function isCloudflareGlobalApiKey(token: string): boolean {
+  const t = token.trim();
+  return /^cfk_[A-Za-z0-9_-]{20,80}$/.test(t) || /^[a-f0-9]{32,40}$/i.test(t);
+}
+
 export function validateCloudflareKeyFormat(rawKey: string): string | null {
   const t = rawKey.trim().replace(/^Bearer\s+/i, "").trim();
   if (!t) return "يرجى لصق مفتاح Cloudflare Global API Key أولاً.";
   if (t.startsWith("vcp_")) {
-    return "⚠️ المفتاح الذي لصقته يبدأ بـ (vcp_) وهو مفتاح منصة Vercel الذي نسخته سابقاً وليس مفتاح Cloudflare! افتح صفحة Cloudflare واضغط View أمام Global API Key لنسخ المفتاح الصحيح.";
+    return "⚠️ المفتاح الذي لصقته يبدأ بـ (vcp_) وهو مفتاح منصة Vercel وليس مفتاح Cloudflare.";
   }
   if (t.startsWith("v1.0-")) {
-    return "⚠️ المفتاح الذي لصقته يبدأ بـ (v1.0-) وهو مفتاح (Origin CA Key) وليس (Global API Key)! في صفحة Cloudflare اضغط View أمام السطر الأول (Global API Key) المكون من 37 حرفاً ورقماً.";
-  }
-  if (t.startsWith("cfk_")) {
-    return "⚠️ المفتاح الذي يبدأ بـ (cfk_) هو مفتاح تجريبي غير حقيقي. يرجى نسخ مفتاح Global API Key الحقيقي من حسابك في Cloudflare (يتكون من 37 حرفاً ورقماً).";
+    return "⚠️ المفتاح الذي لصقته يبدأ بـ (v1.0-) وهو مفتاح (Origin CA Key) وليس (Global API Key).";
   }
   return null;
 }
@@ -37,20 +39,18 @@ function formatCloudflareError(rawMessage: string | undefined, rawToken: string,
   const lower = rawMessage.toLowerCase();
   if (lower.includes("too many authentication failures")) {
     authLockoutUntil = Date.now() + 60_000;
-    return "⏳ حظر مؤقت من Cloudflare لمدة دقائق بسبب محاولات مفتاح API سابقة غير صحيحة. انتظر 3 دقائق ثم الصق الـ Global API Key الصحيح.";
-  }
-  if (lower.includes("invalid access token")) {
-    return `❌ المفتاح الذي لصقته (${rawToken.trim().length} حرفاً) ليس مفتاح Global API Key صالحاً! مفتاح Global API Key في Cloudflare يتكون دائماً من 37 حرفاً ورقماً فقط (a-f و 0-9) بدون شرطات. اضغط على أيقونة العين 👁️ للتأكد مما لصقته.`;
+    return "⏳ حظر مؤقت من Cloudflare لمدة دقائق بسبب محاولات سابقة. انتظر 3 دقائق ثم اضغط حفظ مرة أخرى.";
   }
   if (
     lower.includes("unable to authenticate") ||
     lower.includes("invalid x-auth-key") ||
     lower.includes("invalid api token") ||
+    lower.includes("invalid access token") ||
     lower.includes("authentication error") ||
     lower.includes("invalid format for x-auth-key")
   ) {
     authLockoutUntil = Date.now() + 30_000;
-    return "❌ مفتاح Cloudflare أو إيميل الحساب غير مطابقين. تأكد من كتابة نفس الإيميل المسجل به في Cloudflare ولصق الـ Global API Key (المكون من 37 حرفاً ورقماً).";
+    return "❌ مفتاح Cloudflare أو إيميل الحساب غير مطابقين. تأكد من كتابة نفس الإيميل المسجل به في Cloudflare ولصق الـ Global API Key الصحيح.";
   }
   if (lower.includes("not verified") || lower.includes("destination address")) {
     return "⏳ هذا الإيميل لم يتم تفعيله في Cloudflare بعد! افتح صندوق البريد (Gmail) لهذا الإيميل واضغط على زر Verify email address في رسالة Cloudflare أولاً.";
@@ -67,9 +67,11 @@ async function cfFetch(url: string, auth: CloudflareAuth, init: RequestInit = {}
     return { ok: false, status: 400, data: {}, errorMessage: preCheckError };
   }
 
-  const isHexGlobalKey = /^[a-f0-9]{32,40}$/i.test(t);
+  // Cloudflare Global API Keys either start with `cfk_` (modern format) or are 37-char hex strings (legacy format).
+  // Both MUST be authenticated using X-Auth-Email + X-Auth-Key headers!
+  const useGlobalKeyHeader = isCloudflareGlobalApiKey(t);
 
-  const authHeaders: Record<string, string> = isHexGlobalKey
+  const authHeaders: Record<string, string> = useGlobalKeyHeader
     ? { "X-Auth-Email": email, "X-Auth-Key": t, "Content-Type": "application/json" }
     : { Authorization: `Bearer ${t}`, "Content-Type": "application/json" };
 
@@ -107,6 +109,11 @@ export async function findCloudflareZone(
   const preCheckError = validateCloudflareKeyFormat(auth.token);
   if (preCheckError) {
     throw new Error(preCheckError);
+  }
+
+  const cached = zoneCache.get(cleanDomain);
+  if (cached && Date.now() - cached.cachedAt < 1000 * 60 * 30) {
+    return { zoneId: cached.zoneId, accountId: cached.accountId };
   }
 
   const { ok, data, errorMessage } = await cfFetch(

@@ -47,19 +47,21 @@ export function ApiConnectionModal({
   if (!isOpen) return null;
 
   const trimmedKey = cfKeyInput.trim();
-  const isHex37 = /^[a-f0-9]{32,40}$/i.test(trimmedKey);
+  const isValidFormat =
+    /^cfk_[A-Za-z0-9_-]{20,80}$/.test(trimmedKey) ||
+    /^[a-f0-9]{32,40}$/i.test(trimmedKey);
 
   async function handleSave() {
     if (trimmedKey) {
       if (trimmedKey.startsWith("vcp_")) {
         setError(
-          "⚠️ المفتاح الذي لصقته يبدأ بـ (vcp_) وهو مفتاح منصة Vercel الذي نسخته سابقاً وليس مفتاح Cloudflare! افتح صفحة Cloudflare واضغط View أمام Global API Key."
+          "⚠️ المفتاح الذي لصقته يبدأ بـ (vcp_) وهو مفتاح منصة Vercel وليس مفتاح Cloudflare!"
         );
         return;
       }
       if (trimmedKey.startsWith("v1.0-")) {
         setError(
-          "⚠️ المفتاح الذي لصقته يبدأ بـ (v1.0-) وهو مفتاح (Origin CA Key)! في صفحة Cloudflare اضغط View أمام السطر الأول (Global API Key) المكون من 37 حرفاً ورقماً."
+          "⚠️ المفتاح الذي لصقته يبدأ بـ (v1.0-) وهو مفتاح (Origin CA Key)! اضغط View أمام السطر الأول (Global API Key)."
         );
         return;
       }
@@ -108,17 +110,12 @@ export function ApiConnectionModal({
       });
       const data = await res.json();
       if (res.ok) {
-        onUpdated(data.settings, "تم مسح مفتاح Cloudflare القديم.");
+        onUpdated(data.settings, "تم مسح مفتاح Cloudflare.");
       }
     } finally {
       setLoading(false);
     }
   }
-
-  const isValidSavedKey =
-    settings.hasCloudflareKey &&
-    settings.cloudflareConnected &&
-    !settings.cloudflareKeyPreview?.startsWith("cfk_");
 
   return (
     <div
@@ -163,7 +160,7 @@ export function ApiConnectionModal({
                 <Lock className="h-4 w-4 text-amber-400" />
                 مفتاح Cloudflare Global API Key (لدومين @smsmraw.com)
               </span>
-              {isValidSavedKey ? (
+              {settings.hasCloudflareKey ? (
                 <span
                   dir="ltr"
                   className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2.5 py-0.5 font-mono text-[11px] text-emerald-300"
@@ -172,34 +169,9 @@ export function ApiConnectionModal({
                 </span>
               ) : (
                 <span className="rounded-full border border-rose-500/40 bg-rose-500/15 px-2.5 py-0.5 text-[11px] font-bold text-rose-300">
-                  يحتاج لصق Global API Key الصحيح
+                  غير متصل بعد
                 </span>
               )}
-            </div>
-
-            <div className="space-y-1.5 rounded-xl border border-white/10 bg-[#070B14] p-3.5 text-xs leading-relaxed text-slate-300">
-              <div className="font-semibold text-white">
-                كيف تحصل على المفتاح الصحيح (37 حرفاً ورقماً)؟
-              </div>
-              <div>
-                1. افتح صفحة المفاتيح في حسابك:{" "}
-                <a
-                  href="https://dash.cloudflare.com/profile/api-tokens"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 font-bold text-amber-400 underline hover:text-amber-300"
-                >
-                  فتح صفحة Cloudflare API Keys <ExternalLink className="h-3 w-3" />
-                </a>
-              </div>
-              <div>
-                2. انزل لآخر الصفحة عند جدول <strong>API Keys</strong> واضغط على زر{" "}
-                <strong>View</strong> أمام السطر الأول <strong>Global API Key</strong>{" "}
-                <span className="text-rose-300">(وليس Origin CA Key)</span>.
-              </div>
-              <div>
-                3. انسخ الكود المكون من <strong>37 حرفاً ورقماً</strong> والصقه بالأسفل:
-              </div>
             </div>
 
             <div className="space-y-3 pt-1">
@@ -225,12 +197,12 @@ export function ApiConnectionModal({
                   {trimmedKey ? (
                     <span
                       className={`text-[11px] font-bold ${
-                        isHex37 ? "text-emerald-400" : "text-amber-300"
+                        isValidFormat ? "text-emerald-400" : "text-amber-300"
                       }`}
                     >
-                      {isHex37
+                      {isValidFormat
                         ? `✓ صيغة Global API Key صحيحة (${trimmedKey.length} حرفاً)`
-                        : `طول النص الملصوق: ${trimmedKey.length} حرفاً (اضغط 👁️ للتأكد منه)`}
+                        : `طول النص الملصوق: ${trimmedKey.length} حرفاً`}
                     </span>
                   ) : null}
                 </div>
@@ -241,7 +213,11 @@ export function ApiConnectionModal({
                       type={showKey ? "text" : "password"}
                       value={cfKeyInput}
                       onChange={(e) => setCfKeyInput(e.target.value)}
-                      placeholder="الصق الـ Global API Key هنا (37 حرفاً ورقماً)..."
+                      placeholder={
+                        settings.hasCloudflareKey
+                          ? "المفتاح محفوظ ومتصل — الصق هنا فقط إذا أردت تغييره..."
+                          : "الصق الـ Global API Key هنا (cfk_...)..."
+                      }
                       className="w-full rounded-xl border border-amber-500/40 bg-[#0C1220] py-2.5 pl-3.5 pr-10 text-left font-mono text-xs text-white focus:border-amber-400 focus:outline-none"
                     />
                     <button

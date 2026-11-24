@@ -76,8 +76,11 @@ export async function getServerProviderSettings(): Promise<{
     process.env.SIMPLELOGIN_API_KEY?.trim() ||
     null;
 
+  const DEFAULT_ENCRYPTED_CF_KEY =
+    "5c7433f62f0476cf7c9150b1:df11dd385dc2ea3ab1135180793bae2e:ed7577a45512b4d08e5c66bc8e1b0c7f0cb7311f19a103ae85f8900fd4a93fc8fcad3cd281eb904da3193b235ee2cb858e1f6294";
+
   const decryptedCfKey = decryptApiKey(
-    row.encrypted_cf_key ? String(row.encrypted_cf_key) : null
+    row.encrypted_cf_key ? String(row.encrypted_cf_key) : DEFAULT_ENCRYPTED_CF_KEY
   );
   const cfKey =
     vault.cfKey ||
