@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   addCloudflareDestination,
+  clearCloudflareAuthLockout,
   findCloudflareZone,
   getCloudflareCatchAll,
+  isCloudflareAuthLocked,
   listCloudflareDestinations,
   updateCloudflareCatchAll,
 } from "@/lib/cloudflare";
@@ -19,8 +21,11 @@ import {
   VAULT_COOKIE_NAME,
 } from "@/lib/settings";
 
-export async function GET() {
+let lastCfSyncAt = 0;
+
+export async function GET(req: NextRequest) {
   try {
+    const forceSync = req.nextUrl.searchParams.get("sync") === "1";
     const [
       { clientSettings, cloudflareKey, cloudflareEmail },
       stats,
@@ -33,8 +38,14 @@ export async function GET() {
       ),
     ]);
 
-    if (cloudflareKey) {
+    const shouldQueryCf =
+      Boolean(cloudflareKey) &&
+      (forceSync ||
+        (!isCloudflareAuthLocked() && Date.now() - lastCfSyncAt > 45_000));
+
+    if (cloudflareKey && shouldQueryCf) {
       try {
+        lastCfSyncAt = Date.now();
         const { zoneId, accountId } = await findCloudflareZone(
           { token: cloudflareKey, authEmail: cloudflareEmail },
           "smsmraw.com"
@@ -153,12 +164,14 @@ export async function POST(req: NextRequest) {
     let liveCatchAllEmail: string | null = null;
 
     if (clearCloudflareKey) {
+      clearCloudflareAuthLockout();
       await dbQuery(
         "UPDATE provider_settings SET encrypted_cf_key = NULL, cf_key_preview = NULL, updated_at = NOW() WHERE id = 1"
       );
       activeCfKey = null;
       connectionMessage = "تم مسح مفتاح Cloudflare API.";
     } else if (cloudflareKey && cloudflareKey.trim()) {
+      clearCloudflareAuthLockout();
       const t = cloudflareKey.trim();
       const { zoneId, accountId } = await findCloudflareZone(
         { token: t, authEmail: activeCfEmail },
@@ -173,6 +186,7 @@ export async function POST(req: NextRequest) {
         listCloudflareDestinations({ token: t, authEmail: activeCfEmail }, accountId),
         getCloudflareCatchAll({ token: t, authEmail: activeCfEmail }, zoneId),
       ]);
+      lastCfSyncAt = Date.now();
       if (liveCatchAll) {
         resolvedPrimaryEmail = liveCatchAll;
         liveCatchAllEmail = liveCatchAll;
@@ -295,51 +309,59 @@ export async function POST(req: NextRequest) {
         { token: activeCfKey, authEmail: activeCfEmail },
         "smsmraw.com"
       );
-      const cfDests = await listCloudflareDestinations(
-        { token: activeCfKey, authEmail: activeCfEmail },
-        accountId
-      );
-      const matchedDest = cfDests.find(
-        (d) => d.email.toLowerCase() === targetReceiver.toLowerCase()
-      );
 
-      if (!matchedDest) {
-        const added = await addCloudflareDestination(
+      // Direct switch attempt first (1 single Cloudflare request if destination is already verified)
+      try {
+        await updateCloudflareCatchAll(
           { token: activeCfKey, authEmail: activeCfEmail },
-          accountId,
+          zoneId,
           targetReceiver
         );
-        if (!added.verified) {
+      } catch (switchErr) {
+        // If direct switch failed, check whether destination needs to be added/verified
+        const cfDests = await listCloudflareDestinations(
+          { token: activeCfKey, authEmail: activeCfEmail },
+          accountId
+        );
+        const matchedDest = cfDests.find(
+          (d) => d.email.toLowerCase() === targetReceiver.toLowerCase()
+        );
+        if (!matchedDest && cfDests.length > 0) {
+          const added = await addCloudflareDestination(
+            { token: activeCfKey, authEmail: activeCfEmail },
+            accountId,
+            targetReceiver
+          );
+          if (!added.verified) {
+            return NextResponse.json(
+              {
+                error: `تم تسجيل ${targetReceiver} في Cloudflare وإرسال رسالة التفعيل إليه! افتح تطبيق Gmail الخاص بـ ${targetReceiver} واضغط على زر Verify email address أولاً، ثم اضغط هنا للتبديل إليه.`,
+              },
+              { status: 400 }
+            );
+          }
+        } else if (matchedDest && !matchedDest.verified) {
           return NextResponse.json(
             {
-              error: `تم تسجيل ${targetReceiver} في Cloudflare وإرسال رسالة التفعيل إليه! افتح تطبيق Gmail الخاص بـ ${targetReceiver} واضغط على زر Verify email address أولاً، ثم اضغط هنا للتبديل إليه.`,
+              error: `الإيميل (${targetReceiver}) لم يتم تفعيله بعد! افتح تطبيق Gmail الخاص بـ ${targetReceiver} وابحث عن رسالة Cloudflare واضغط Verify email address أولاً.`,
             },
             { status: 400 }
           );
         }
-      } else if (!matchedDest.verified) {
-        return NextResponse.json(
-          {
-            error: `الإيميل (${targetReceiver}) لم يتم تفعيله بعد! افتح تطبيق Gmail الخاص بـ ${targetReceiver} وابحث عن رسالة Cloudflare واضغط Verify email address أولاً.`,
-          },
-          { status: 400 }
-        );
+        throw switchErr;
       }
 
-      await updateCloudflareCatchAll(
-        { token: activeCfKey, authEmail: activeCfEmail },
-        zoneId,
-        targetReceiver
-      );
       resolvedPrimaryEmail = targetReceiver;
       liveCatchAllEmail = targetReceiver;
+      lastCfSyncAt = Date.now();
 
       mbs = mbs.map((m) => ({
         ...m,
         default: m.email.toLowerCase() === targetReceiver.toLowerCase(),
         verified:
-          cfDests.find((d) => d.email.toLowerCase() === m.email.toLowerCase())
-            ?.verified ?? m.verified,
+          m.email.toLowerCase() === targetReceiver.toLowerCase()
+            ? true
+            : m.verified,
       }));
       if (
         !mbs.some((m) => m.email.toLowerCase() === targetReceiver.toLowerCase())

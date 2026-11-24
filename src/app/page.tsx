@@ -142,9 +142,9 @@ export default function BulkEmailAliasDashboard() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  const loadSettings = useCallback(async () => {
+  const loadSettings = useCallback(async (forceSync = false) => {
     try {
-      const r = await fetch("/api/settings");
+      const r = await fetch(forceSync ? "/api/settings?sync=1" : "/api/settings");
       const d = await r.json();
       if (d.settings) {
         setSettings(d.settings);
@@ -474,7 +474,7 @@ export default function BulkEmailAliasDashboard() {
               type="button"
               onClick={() => {
                 setSwitchingReceiver(true);
-                loadSettings().finally(() => setSwitchingReceiver(false));
+                loadSettings(true).finally(() => setSwitchingReceiver(false));
               }}
               className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3.5 py-2.5 text-xs font-bold text-slate-200 transition hover:bg-white/10"
             >
