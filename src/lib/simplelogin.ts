@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import type {
+  GenerationMode,
   SimpleLoginMailbox,
   SimpleLoginSuffix,
   SimpleLoginUserInfo,
@@ -46,7 +47,73 @@ export interface SimpleLoginOptionsResponse {
   suffixes: SimpleLoginSuffix[];
 }
 
-const WORD_BANK_ADJECTIVES = [
+const FIRST_NAMES = [
+  "mohamed",
+  "ahmed",
+  "mahmoud",
+  "mostafa",
+  "youssef",
+  "ibrahim",
+  "hassan",
+  "hussein",
+  "omar",
+  "ali",
+  "khaled",
+  "tarek",
+  "amr",
+  "karim",
+  "rami",
+  "samy",
+  "ziad",
+  "marwan",
+  "walid",
+  "adel",
+  "islam",
+  "sherif",
+  "tamer",
+  "hazem",
+  "essam",
+  "hossam",
+  "ayman",
+  "bassem",
+  "nabil",
+  "sameh",
+];
+
+const LAST_NAMES = [
+  "samy",
+  "hassan",
+  "kamal",
+  "ibrahim",
+  "mansour",
+  "farouk",
+  "salem",
+  "maher",
+  "fawzy",
+  "nasser",
+  "hamdy",
+  "شوقي",
+  "soliman",
+  "osman",
+  "amer",
+  "gaber",
+  "helmy",
+  "zaki",
+  "lotfy",
+  "shawky",
+  "radwan",
+  "kamel",
+  "fouad",
+  "gamal",
+  "anwar",
+  "fahmy",
+  "saad",
+  "eid",
+  "badawy",
+  "ashraf",
+].filter((n) => /^[a-z]+$/.test(n));
+
+const WORD_ADJECTIVES = [
   "lunar",
   "cobalt",
   "velvet",
@@ -69,7 +136,7 @@ const WORD_BANK_ADJECTIVES = [
   "quartz",
 ];
 
-const WORD_BANK_NOUNS = [
+const WORD_NOUNS = [
   "falcon",
   "relay",
   "shield",
@@ -157,7 +224,7 @@ export class SimpleLoginClient {
         }
 
         throw new SimpleLoginApiError(
-          `SimpleLogin API rate limit reached (HTTP 429). Please wait ${retryAfterSec}s before generating another batch.`,
+          `SimpleLogin API rate limit reached (HTTP 429). Please wait ${retryAfterSec}s.`,
           429,
           true,
           retryAfterSec
@@ -188,67 +255,27 @@ export class SimpleLoginClient {
   }
 
   async getUserInfo(): Promise<SimpleLoginUserInfo> {
-    return this.request<SimpleLoginUserInfo>("/api/user_info", {
-      method: "GET",
-    });
+    return this.request<SimpleLoginUserInfo>("/api/user_info", { method: "GET" });
   }
 
   async getAliasOptions(hostname?: string): Promise<SimpleLoginOptionsResponse> {
-    const query = hostname
-      ? `?hostname=${encodeURIComponent(hostname)}`
-      : "";
-    return this.request<SimpleLoginOptionsResponse>(
-      `/api/v5/alias/options${query}`,
-      { method: "GET" }
-    );
+    const query = hostname ? `?hostname=${encodeURIComponent(hostname)}` : "";
+    return this.request<SimpleLoginOptionsResponse>(`/api/v5/alias/options${query}`, { method: "GET" });
   }
 
   async getMailboxes(): Promise<{ mailboxes: SimpleLoginMailbox[] }> {
-    return this.request<{ mailboxes: SimpleLoginMailbox[] }>(
-      "/api/v2/mailboxes",
-      { method: "GET" }
-    );
+    return this.request<{ mailboxes: SimpleLoginMailbox[] }>("/api/v2/mailboxes", { method: "GET" });
   }
 
-  async createMailbox(email: string): Promise<SimpleLoginMailbox> {
-    return this.request<SimpleLoginMailbox>("/api/mailboxes", {
+  async listAliases(pageId = 0): Promise<{ aliases: SimpleLoginAliasResponse[] }> {
+    return this.request<{ aliases: SimpleLoginAliasResponse[] }>(`/api/v2/aliases?page_id=${pageId}`, { method: "GET" });
+  }
+
+  async createRandomAlias(params: { mode: "word" | "uuid"; note?: string }): Promise<SimpleLoginAliasResponse> {
+    return this.request<SimpleLoginAliasResponse>(`/api/alias/random/new?mode=${params.mode}`, {
       method: "POST",
-      body: JSON.stringify({ email }),
+      body: JSON.stringify({ note: params.note || "" }),
     });
-  }
-
-  async listAliases(
-    pageId = 0,
-    query?: string
-  ): Promise<{ aliases: SimpleLoginAliasResponse[] }> {
-    const params = new URLSearchParams({ page_id: String(pageId) });
-    return this.request<{ aliases: SimpleLoginAliasResponse[] }>(
-      `/api/v2/aliases?${params.toString()}`,
-      {
-        method: query ? "POST" : "GET",
-        body: query ? JSON.stringify({ query }) : undefined,
-      }
-    );
-  }
-
-  async createRandomAlias(params: {
-    mode: "word" | "uuid";
-    note?: string;
-    hostname?: string;
-  }): Promise<SimpleLoginAliasResponse> {
-    const query = new URLSearchParams({ mode: params.mode });
-    if (params.hostname) {
-      query.set("hostname", params.hostname);
-    }
-    return this.request<SimpleLoginAliasResponse>(
-      `/api/alias/random/new?${query.toString()}`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          note: params.note || "",
-        }),
-      }
-    );
   }
 
   async createCustomAlias(params: {
@@ -270,97 +297,67 @@ export class SimpleLoginClient {
     });
   }
 
-  async toggleAlias(
-    remoteAliasId: number
-  ): Promise<{ enabled: boolean }> {
-    return this.request<{ enabled: boolean }>(
-      `/api/aliases/${remoteAliasId}/toggle`,
-      {
-        method: "POST",
-      }
-    );
+  async toggleAlias(remoteAliasId: number): Promise<{ enabled: boolean }> {
+    return this.request<{ enabled: boolean }>(`/api/aliases/${remoteAliasId}/toggle`, { method: "POST" });
   }
 
-  async deleteAlias(
-    remoteAliasId: number
-  ): Promise<{ deleted: boolean }> {
-    return this.request<{ deleted: boolean }>(
-      `/api/aliases/${remoteAliasId}`,
-      {
-        method: "DELETE",
-      }
-    );
-  }
-
-  async updateAlias(
-    remoteAliasId: number,
-    payload: {
-      note?: string;
-      name?: string;
-      mailbox_ids?: number[];
-      pinned?: boolean;
-    }
-  ): Promise<{ ok?: boolean }> {
-    return this.request<{ ok?: boolean }>(
-      `/api/aliases/${remoteAliasId}`,
-      {
-        method: "PATCH",
-        body: JSON.stringify(payload),
-      }
-    );
+  async deleteAlias(remoteAliasId: number): Promise<{ deleted: boolean }> {
+    return this.request<{ deleted: boolean }>(`/api/aliases/${remoteAliasId}`, { method: "DELETE" });
   }
 }
 
-/**
- * Generates a realistic SimpleLogin-formatted alias in Sandbox mode
- * while honoring exact SimpleLogin suffix and prefix conventions.
- */
 export function generateSandboxAliasAddress(params: {
-  mode: "random_word" | "random_uuid" | "custom_prefix" | "numeric_dot";
+  mode: GenerationMode;
   prefixPattern?: string;
   domainSuffix: string;
   index: number;
-}): { email: string; prefix: string; domain: string; remoteId: number } {
-  const cleanDomain = params.domainSuffix.startsWith("@")
-    ? params.domainSuffix.slice(1)
-    : params.domainSuffix;
+}): { email: string; prefix: string; domain: string } {
+  const cleanSuffix =
+    params.domainSuffix.startsWith("@") || params.domainSuffix.startsWith(".")
+      ? params.domainSuffix.trim()
+      : `@${params.domainSuffix.trim()}`;
 
-  const randToken = crypto.randomBytes(3).toString("hex").slice(0, 5);
+  const atIndex = cleanSuffix.indexOf("@");
+  const domainOnly = atIndex >= 0 ? cleanSuffix.slice(atIndex + 1) : cleanSuffix;
+
   let prefix = "";
 
-  if (params.mode === "numeric_dot" || params.mode === "random_uuid") {
-    // Format: a45286444.6171425682@smsmraw.com (letter + 8-9 digits + . + 10 digits)
-    const part1 = Math.floor(10000000 + Math.random() * 90000000);
-    const part2 = Math.floor(1000000000 + Math.random() * 9000000000);
-    prefix = `a${part1}.${part2}`;
+  if (params.mode === "numeric_dot") {
+    // Format: a45286444.6171425682@smsmraw.com
+    const p1 = crypto.randomInt(100000000, 999999999);
+    const p2 = crypto.randomInt(1000000000, 9999999999);
+    prefix = `a${p1}.${p2}`;
+  } else if (params.mode === "realistic_name") {
+    // Format: mohamed.samy4821@smsmraw.com
+    const fn = FIRST_NAMES[crypto.randomInt(0, FIRST_NAMES.length)];
+    const ln = LAST_NAMES[crypto.randomInt(0, LAST_NAMES.length)];
+    const num = crypto.randomInt(1000, 99999);
+    prefix = `${fn}.${ln}${num}`;
   } else if (params.mode === "custom_prefix" && params.prefixPattern?.trim()) {
-    const sanitizedBase = params.prefixPattern
+    const base = params.prefixPattern
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9._-]/g, "-")
       .replace(/-+/g, "-")
       .replace(/^-|-$/g, "");
     const seq = String(params.index + 1).padStart(2, "0");
-    prefix = `${sanitizedBase || "alias"}-${seq}.${randToken}`;
+    const randDigits = crypto.randomInt(1000, 9999);
+    prefix = `${base || "user"}${seq}.${randDigits}`;
   } else {
-    const adj =
-      WORD_BANK_ADJECTIVES[
-        Math.floor(Math.random() * WORD_BANK_ADJECTIVES.length)
-      ];
-    const noun =
-      WORD_BANK_NOUNS[Math.floor(Math.random() * WORD_BANK_NOUNS.length)];
+    const adj = WORD_ADJECTIVES[crypto.randomInt(0, WORD_ADJECTIVES.length)];
+    const noun = WORD_NOUNS[crypto.randomInt(0, WORD_NOUNS.length)];
+    const randToken = crypto.randomBytes(3).toString("hex").slice(0, 5);
     prefix = `${adj}_${noun}.${randToken}`;
   }
 
-  const remoteId =
-    Math.floor(Date.now() / 100) % 90000000 +
-    params.index * 17 +
-    Math.floor(Math.random() * 1000);
+  const fullEmail = cleanSuffix.startsWith(".")
+    ? `${prefix}${cleanSuffix}`
+    : `${prefix}@${domainOnly}`;
+  const [finalPrefix, finalDomain] = fullEmail.split("@");
 
   return {
-    email: `${prefix}@${cleanDomain}`,
-    prefix,
-    domain: cleanDomain,
-    remoteId,
+    email: fullEmail,
+    prefix: finalPrefix,
+    domain: finalDomain || domainOnly,
   };
 }

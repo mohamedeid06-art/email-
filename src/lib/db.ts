@@ -33,7 +33,7 @@ if (!globalForDb.__bulkAliasDb) {
 
 const dbState = globalForDb.__bulkAliasDb;
 
-const DEFAULT_SANDBOX_SUFFIXES: SimpleLoginSuffix[] = [
+export const DEFAULT_SANDBOX_SUFFIXES: SimpleLoginSuffix[] = [
   {
     suffix: "@smsmraw.com",
     signed_suffix: "sl_sig_smsmraw.com.v5.verified",
@@ -52,27 +52,9 @@ const DEFAULT_SANDBOX_SUFFIXES: SimpleLoginSuffix[] = [
     is_custom: false,
     is_premium: false,
   },
-  {
-    suffix: "@aleeas.com",
-    signed_suffix: "sl_sig_aleeas.com.v5.verified",
-    is_custom: false,
-    is_premium: false,
-  },
-  {
-    suffix: "@slmail.me",
-    signed_suffix: "sl_sig_slmail.me.v5.verified",
-    is_custom: false,
-    is_premium: true,
-  },
-  {
-    suffix: "@8shield.net",
-    signed_suffix: "sl_sig_8shield.net.v5.verified",
-    is_custom: false,
-    is_premium: true,
-  },
 ];
 
-const DEFAULT_SANDBOX_MAILBOXES: SimpleLoginMailbox[] = [
+export const DEFAULT_SANDBOX_MAILBOXES: SimpleLoginMailbox[] = [
   {
     id: 10421,
     email: "mhmdsamy112233@gmail.com",
@@ -83,60 +65,23 @@ const DEFAULT_SANDBOX_MAILBOXES: SimpleLoginMailbox[] = [
   },
 ];
 
-async function initializeDatabase(): Promise<void> {
-  const databaseUrl = process.env.DATABASE_URL?.trim();
-
-  if (databaseUrl) {
-    try {
-      const pool = new Pool({
-        connectionString: databaseUrl,
-        connectionTimeoutMillis: 4000,
-      });
-      await pool.query("SELECT 1");
-      dbState.pgPool = pool;
-      dbState.engineLabel = "PostgreSQL (External Server via pg.Pool)";
-    } catch (err) {
-      console.warn(
-        "External DATABASE_URL unreachable, falling back to embedded PostgreSQL 16 (PGlite):",
-        err
-      );
-    }
-  }
-
-  if (!dbState.pgPool && !dbState.pglite) {
-    try {
-      const baseDir = process.env.VERCEL
-        ? path.join(os.tmpdir(), "bulk-alias-manager")
-        : path.join(process.cwd(), "data");
-      const dataDir = path.join(baseDir, "postgres");
-      fs.mkdirSync(dataDir, { recursive: true });
-      dbState.pglite = new PGlite(dataDir);
-      await dbState.pglite.waitReady;
-      dbState.engineLabel = "PostgreSQL 16 (Persistent Cluster)";
-    } catch {
-      dbState.pglite = new PGlite();
-      await dbState.pglite.waitReady;
-      dbState.engineLabel = "PostgreSQL 16 (Serverless Cluster)";
-    }
-  }
-
-  const schemaPath = path.join(process.cwd(), "db", "schema.sql");
-  const schemaSql = fs.existsSync(schemaPath)
-    ? fs.readFileSync(schemaPath, "utf8")
-    : `
+const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS provider_settings (
   id INTEGER PRIMARY KEY DEFAULT 1,
   api_base_url TEXT NOT NULL DEFAULT 'https://app.simplelogin.io',
   encrypted_api_key TEXT,
   api_key_preview TEXT,
-  mode TEXT NOT NULL DEFAULT 'live',
-  primary_email TEXT NOT NULL DEFAULT '',
+  encrypted_cf_key TEXT,
+  cf_key_preview TEXT,
+  cf_auth_email TEXT,
+  mode TEXT NOT NULL DEFAULT 'sandbox',
+  primary_email TEXT NOT NULL DEFAULT 'mhmdsamy112233@gmail.com',
   default_mailbox_id INTEGER,
   default_suffix TEXT,
   default_signed_suffix TEXT,
   account_name TEXT,
   account_email TEXT,
-  is_premium BOOLEAN NOT NULL DEFAULT FALSE,
+  is_premium BOOLEAN NOT NULL DEFAULT TRUE,
   in_trial BOOLEAN NOT NULL DEFAULT FALSE,
   max_alias_free_plan INTEGER NOT NULL DEFAULT 10,
   can_create BOOLEAN NOT NULL DEFAULT TRUE,
@@ -146,6 +91,10 @@ CREATE TABLE IF NOT EXISTS provider_settings (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT single_row CHECK (id = 1)
 );
+ALTER TABLE provider_settings ADD COLUMN IF NOT EXISTS encrypted_cf_key TEXT;
+ALTER TABLE provider_settings ADD COLUMN IF NOT EXISTS cf_key_preview TEXT;
+ALTER TABLE provider_settings ADD COLUMN IF NOT EXISTS cf_auth_email TEXT;
+
 CREATE TABLE IF NOT EXISTS generation_batches (
   id TEXT PRIMARY KEY,
   requested_count INTEGER NOT NULL,
@@ -162,9 +111,10 @@ CREATE TABLE IF NOT EXISTS generation_batches (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   completed_at TIMESTAMPTZ
 );
+
 CREATE TABLE IF NOT EXISTS aliases (
   id SERIAL PRIMARY KEY,
-  remote_alias_id INTEGER UNIQUE,
+  remote_alias_id INTEGER,
   email TEXT NOT NULL UNIQUE,
   prefix TEXT NOT NULL,
   domain TEXT NOT NULL,
@@ -172,6 +122,8 @@ CREATE TABLE IF NOT EXISTS aliases (
   mailbox_id INTEGER,
   mailboxes JSONB NOT NULL DEFAULT '[]'::jsonb,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  is_used BOOLEAN NOT NULL DEFAULT FALSE,
+  used_at TIMESTAMPTZ,
   creation_status TEXT NOT NULL DEFAULT 'active',
   forwarding_status TEXT NOT NULL DEFAULT 'configured',
   note TEXT DEFAULT '',
@@ -181,25 +133,61 @@ CREATE TABLE IF NOT EXISTS aliases (
   nb_reply INTEGER NOT NULL DEFAULT 0,
   nb_block INTEGER NOT NULL DEFAULT 0,
   pinned BOOLEAN NOT NULL DEFAULT FALSE,
-  provider_mode TEXT NOT NULL DEFAULT 'live',
+  provider_mode TEXT NOT NULL DEFAULT 'sandbox',
   error_message TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE aliases DROP CONSTRAINT IF EXISTS aliases_remote_alias_id_key;
+ALTER TABLE aliases ADD COLUMN IF NOT EXISTS is_used BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE aliases ADD COLUMN IF NOT EXISTS used_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS idx_aliases_email ON aliases (email);
 CREATE INDEX IF NOT EXISTS idx_aliases_primary_email ON aliases (primary_email);
 CREATE INDEX IF NOT EXISTS idx_aliases_enabled ON aliases (enabled);
+CREATE INDEX IF NOT EXISTS idx_aliases_is_used ON aliases (is_used);
 CREATE INDEX IF NOT EXISTS idx_aliases_batch_id ON aliases (batch_id);
 CREATE INDEX IF NOT EXISTS idx_aliases_created_at ON aliases (created_at DESC);
 `;
 
-  if (dbState.pgPool) {
-    await dbState.pgPool.query(schemaSql);
-  } else if (dbState.pglite) {
-    await dbState.pglite.exec(schemaSql);
+async function initializeDatabase(): Promise<void> {
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+
+  if (databaseUrl) {
+    try {
+      const pool = new Pool({
+        connectionString: databaseUrl,
+        connectionTimeoutMillis: 4000,
+      });
+      await pool.query("SELECT 1");
+      dbState.pgPool = pool;
+      dbState.engineLabel = "PostgreSQL (External Server)";
+    } catch {}
   }
 
-  // Ensure singleton row in provider_settings exists
+  if (!dbState.pgPool && !dbState.pglite) {
+    try {
+      const baseDir = process.env.VERCEL
+        ? path.join(os.tmpdir(), "bulk-alias-manager-v6")
+        : path.join(process.cwd(), "data");
+      const dataDir = path.join(baseDir, "postgres");
+      fs.mkdirSync(dataDir, { recursive: true });
+      dbState.pglite = new PGlite(dataDir);
+      await dbState.pglite.waitReady;
+      dbState.engineLabel = "PostgreSQL 16 (Persistent Cluster)";
+    } catch {
+      dbState.pglite = new PGlite();
+      await dbState.pglite.waitReady;
+      dbState.engineLabel = "PostgreSQL 16 (Serverless Cluster)";
+    }
+  }
+
+  if (dbState.pgPool) {
+    await dbState.pgPool.query(SCHEMA_SQL);
+  } else if (dbState.pglite) {
+    await dbState.pglite.exec(SCHEMA_SQL);
+  }
+
   const existing = await rawQuery<{ id: number }>(
     "SELECT id FROM provider_settings WHERE id = 1"
   );
@@ -221,13 +209,13 @@ CREATE INDEX IF NOT EXISTS idx_aliases_created_at ON aliases (created_at DESC);
       ) ON CONFLICT (id) DO NOTHING`,
       [
         envApiUrl,
-        process.env.SIMPLELOGIN_API_KEY ? "live" : "sandbox",
-        "ops-primary@proton.me",
+        "sandbox",
+        "mhmdsamy112233@gmail.com",
         10421,
-        "@simplelogin.com",
-        "sl_sig_simplelogin.com.v5.verified",
-        "SimpleLogin Workspace",
-        "ops-primary@proton.me",
+        "@smsmraw.com",
+        "sl_sig_smsmraw.com.v5.verified",
+        "Cloudflare & SimpleLogin Workspace",
+        "mhmdsamy112233@gmail.com",
         true,
         false,
         10,
@@ -307,7 +295,14 @@ export function mapAliasRow(row: Record<string, unknown>): AliasRecord {
         : null,
     mailboxes,
     enabled: Boolean(row.enabled),
-    creationStatus: (row.creation_status as AliasRecord["creationStatus"]) || "active",
+    isUsed: Boolean(row.is_used),
+    usedAt: row.used_at
+      ? row.used_at instanceof Date
+        ? row.used_at.toISOString()
+        : String(row.used_at)
+      : null,
+    creationStatus:
+      (row.creation_status as AliasRecord["creationStatus"]) || "active",
     forwardingStatus:
       (row.forwarding_status as AliasRecord["forwardingStatus"]) || "configured",
     note: String(row.note || ""),
@@ -317,7 +312,7 @@ export function mapAliasRow(row: Record<string, unknown>): AliasRecord {
     nbReply: Number(row.nb_reply || 0),
     nbBlock: Number(row.nb_block || 0),
     pinned: Boolean(row.pinned),
-    providerMode: (row.provider_mode as "live" | "sandbox") || "live",
+    providerMode: (row.provider_mode as "live" | "sandbox") || "sandbox",
     errorMessage: row.error_message ? String(row.error_message) : null,
     createdAt:
       row.created_at instanceof Date
@@ -345,7 +340,7 @@ export function mapBatchRow(
         : null,
     generationMode:
       (row.generation_mode as GenerationBatchRecord["generationMode"]) ||
-      "random_word",
+      "numeric_dot",
     prefixPattern: row.prefix_pattern ? String(row.prefix_pattern) : null,
     domainSuffix: row.domain_suffix ? String(row.domain_suffix) : null,
     note: row.note ? String(row.note) : null,
@@ -368,6 +363,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     SELECT
       COUNT(*)::int AS total_aliases,
       COUNT(*) FILTER (WHERE enabled = TRUE AND creation_status = 'active')::int AS active_aliases,
+      COUNT(*) FILTER (WHERE is_used = FALSE AND enabled = TRUE)::int AS unused_aliases,
+      COUNT(*) FILTER (WHERE is_used = TRUE)::int AS used_aliases,
       COUNT(*) FILTER (WHERE enabled = FALSE OR creation_status = 'disabled')::int AS disabled_aliases,
       COUNT(*) FILTER (WHERE creation_status IN ('failed', 'rate_limited'))::int AS failed_aliases,
       COALESCE(SUM(nb_forward), 0)::int AS total_forwarded,
@@ -385,6 +382,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   return {
     totalAliases: Number(row.total_aliases || 0),
     activeAliases: Number(row.active_aliases || 0),
+    unusedAliases: Number(row.unused_aliases || 0),
+    usedAliases: Number(row.used_aliases || 0),
     disabledAliases: Number(row.disabled_aliases || 0),
     failedAliases: Number(row.failed_aliases || 0),
     totalForwarded: Number(row.total_forwarded || 0),
@@ -394,5 +393,3 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     uniqueDomains: Number(row.unique_domains || 0),
   };
 }
-
-export { DEFAULT_SANDBOX_MAILBOXES, DEFAULT_SANDBOX_SUFFIXES };

@@ -35,6 +35,12 @@ export interface ProviderSettingsClient {
   apiBaseUrl: string;
   hasApiKey: boolean;
   apiKeyPreview: string | null;
+  hasCloudflareKey: boolean;
+  cloudflareKeyPreview: string | null;
+  cloudflareAuthEmail: string | null;
+  cloudflareLiveCatchAll: string | null;
+  cloudflareConnected: boolean;
+  cloudflareError: string | null;
   mode: "live" | "sandbox";
   primaryEmail: string;
   defaultMailboxId: number | null;
@@ -66,6 +72,12 @@ export type ForwardingStatus =
   | "unverified"
   | "error";
 
+export type GenerationMode =
+  | "numeric_dot"
+  | "realistic_name"
+  | "custom_prefix"
+  | "random_word";
+
 export interface AliasMailboxRef {
   id: number;
   email: string;
@@ -81,6 +93,8 @@ export interface AliasRecord {
   mailboxId: number | null;
   mailboxes: AliasMailboxRef[];
   enabled: boolean;
+  isUsed: boolean;
+  usedAt: string | null;
   creationStatus: CreationStatus;
   forwardingStatus: ForwardingStatus;
   note: string;
@@ -103,7 +117,7 @@ export interface GenerationBatchRecord {
   failedCount: number;
   primaryEmail: string;
   mailboxId: number | null;
-  generationMode: "random_word" | "random_uuid" | "custom_prefix";
+  generationMode: GenerationMode;
   prefixPattern: string | null;
   domainSuffix: string | null;
   note: string | null;
@@ -116,6 +130,8 @@ export interface GenerationBatchRecord {
 export interface DashboardStats {
   totalAliases: number;
   activeAliases: number;
+  unusedAliases: number;
+  usedAliases: number;
   disabledAliases: number;
   failedAliases: number;
   totalForwarded: number;

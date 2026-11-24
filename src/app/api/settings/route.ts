@@ -1,32 +1,84 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  addCloudflareDestination,
+  findCloudflareZone,
+  getCloudflareCatchAll,
+  listCloudflareDestinations,
+  updateCloudflareCatchAll,
+} from "@/lib/cloudflare";
 import { encryptApiKey, maskApiKey } from "@/lib/crypto";
 import {
   dbQuery,
-  DEFAULT_SANDBOX_MAILBOXES,
   DEFAULT_SANDBOX_SUFFIXES,
   getDashboardStats,
   mapBatchRow,
 } from "@/lib/db";
 import {
   getServerProviderSettings,
-  seedInitialAliasesIfEmpty,
+  serializeVaultCookie,
+  VAULT_COOKIE_NAME,
 } from "@/lib/settings";
-import {
-  SimpleLoginApiError,
-  SimpleLoginClient,
-} from "@/lib/simplelogin";
-import type { SimpleLoginMailbox } from "@/lib/types";
 
 export async function GET() {
   try {
-    await seedInitialAliasesIfEmpty();
-    const [{ clientSettings }, stats, batchesRes] = await Promise.all([
+    const [
+      { clientSettings, cloudflareKey, cloudflareEmail },
+      stats,
+      batchesRes,
+    ] = await Promise.all([
       getServerProviderSettings(),
       getDashboardStats(),
       dbQuery<Record<string, unknown>>(
         "SELECT * FROM generation_batches ORDER BY created_at DESC LIMIT 8"
       ),
     ]);
+
+    if (cloudflareKey) {
+      try {
+        const { zoneId, accountId } = await findCloudflareZone(
+          { token: cloudflareKey, authEmail: cloudflareEmail },
+          "smsmraw.com"
+        );
+        const [liveCatchAll, cfDests] = await Promise.all([
+          getCloudflareCatchAll(
+            { token: cloudflareKey, authEmail: cloudflareEmail },
+            zoneId
+          ),
+          listCloudflareDestinations(
+            { token: cloudflareKey, authEmail: cloudflareEmail },
+            accountId
+          ),
+        ]);
+        clientSettings.cloudflareConnected = true;
+        if (liveCatchAll) {
+          clientSettings.cloudflareLiveCatchAll = liveCatchAll;
+          clientSettings.primaryEmail = liveCatchAll;
+        }
+        if (cfDests.length > 0) {
+          const merged = [...clientSettings.availableMailboxes];
+          for (const d of cfDests) {
+            const ex = merged.find(
+              (m) => m.email.toLowerCase() === d.email.toLowerCase()
+            );
+            if (ex) {
+              ex.verified = d.verified;
+            } else {
+              merged.push({
+                id: merged.length + 10421,
+                email: d.email,
+                default: d.email === liveCatchAll,
+                verified: d.verified,
+              });
+            }
+          }
+          clientSettings.availableMailboxes = merged;
+        }
+      } catch (err) {
+        clientSettings.cloudflareConnected = false;
+        clientSettings.cloudflareError =
+          err instanceof Error ? err.message : "Cloudflare connection error";
+      }
+    }
 
     return NextResponse.json({
       settings: clientSettings,
@@ -37,9 +89,7 @@ export async function GET() {
     return NextResponse.json(
       {
         error:
-          err instanceof Error
-            ? err.message
-            : "Failed to load provider settings",
+          err instanceof Error ? err.message : "Failed to load settings",
       },
       { status: 500 }
     );
@@ -52,274 +102,332 @@ export async function POST(req: NextRequest) {
     const {
       apiKey,
       clearApiKey,
+      cloudflareKey,
+      cloudflareAuthEmail,
+      clearCloudflareKey,
       apiBaseUrl,
       mode,
       primaryEmail,
-      defaultMailboxId,
+      addReceiverEmail,
+      removeReceiverEmail,
+      switchActiveReceiver,
+      updateExistingAliasesToReceiver,
       defaultSuffix,
-      verifyConnection,
-      isPremiumPlanSim,
-    } = body as {
-      apiKey?: string;
-      clearApiKey?: boolean;
-      apiBaseUrl?: string;
-      mode?: "live" | "sandbox";
-      primaryEmail?: string;
-      defaultMailboxId?: number;
-      defaultSuffix?: string;
-      verifyConnection?: boolean;
-      isPremiumPlanSim?: boolean;
-    };
+    } = body;
 
     const current = await getServerProviderSettings();
-
-    let resolvedBaseUrl =
+    const resolvedBaseUrl =
       apiBaseUrl?.trim().replace(/\/+$/, "") ||
-      current.clientSettings.apiBaseUrl ||
-      "https://app.simplelogin.io";
-
-    let resolvedMode: "live" | "sandbox" =
-      mode || current.clientSettings.mode || "sandbox";
-
+      current.clientSettings.apiBaseUrl;
+    let resolvedMode: "live" | "sandbox" = mode || current.clientSettings.mode;
     let resolvedPrimaryEmail =
-      primaryEmail !== undefined
+      switchActiveReceiver?.trim() ||
+      (primaryEmail !== undefined
         ? primaryEmail.trim()
-        : current.clientSettings.primaryEmail;
+        : current.clientSettings.primaryEmail);
 
-    if (
-      resolvedPrimaryEmail &&
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resolvedPrimaryEmail)
-    ) {
-      return NextResponse.json(
-        { error: "Please enter a valid primary email address." },
-        { status: 400 }
-      );
-    }
-
-    // Handle API key updates securely on the server
     let activeApiKey = current.apiKey;
     if (clearApiKey) {
       await dbQuery(
-        `UPDATE provider_settings
-         SET encrypted_api_key = NULL, api_key_preview = NULL, mode = 'sandbox', updated_at = NOW()
-         WHERE id = 1`
+        "UPDATE provider_settings SET encrypted_api_key = NULL, api_key_preview = NULL, mode = 'sandbox', updated_at = NOW() WHERE id = 1"
       );
       activeApiKey = null;
       resolvedMode = "sandbox";
     } else if (apiKey && apiKey.trim()) {
-      const trimmedKey = apiKey.trim();
-      const encrypted = encryptApiKey(trimmedKey);
-      const preview = maskApiKey(trimmedKey);
+      const t = apiKey.trim();
       await dbQuery(
-        `UPDATE provider_settings
-         SET encrypted_api_key = $1, api_key_preview = $2, updated_at = NOW()
-         WHERE id = 1`,
-        [encrypted, preview]
+        "UPDATE provider_settings SET encrypted_api_key = $1, api_key_preview = $2, updated_at = NOW() WHERE id = 1",
+        [encryptApiKey(t), maskApiKey(t)]
       );
-      activeApiKey = trimmedKey;
+      activeApiKey = t;
     }
 
-    let connectionMessage = "Settings saved to PostgreSQL.";
-    let liveVerified = false;
+    let activeCfKey = current.cloudflareKey;
+    const activeCfEmail =
+      cloudflareAuthEmail !== undefined
+        ? cloudflareAuthEmail.trim()
+        : current.cloudflareEmail || "mhmdsamy112233@gmail.com";
 
-    // If mode is 'live' or verifyConnection requested, authenticate against SimpleLogin API
-    if (resolvedMode === "live" || verifyConnection) {
-      if (!activeApiKey) {
+    let mbs = [...current.clientSettings.availableMailboxes];
+    let connectionMessage = "تم حفظ الإعدادات بنجاح.";
+    let liveCatchAllEmail: string | null = null;
+
+    if (clearCloudflareKey) {
+      await dbQuery(
+        "UPDATE provider_settings SET encrypted_cf_key = NULL, cf_key_preview = NULL, updated_at = NOW() WHERE id = 1"
+      );
+      activeCfKey = null;
+      connectionMessage = "تم مسح مفتاح Cloudflare API.";
+    } else if (cloudflareKey && cloudflareKey.trim()) {
+      const t = cloudflareKey.trim();
+      const { zoneId, accountId } = await findCloudflareZone(
+        { token: t, authEmail: activeCfEmail },
+        "smsmraw.com"
+      );
+      await dbQuery(
+        "UPDATE provider_settings SET encrypted_cf_key = $1, cf_key_preview = $2, cf_auth_email = $3, updated_at = NOW() WHERE id = 1",
+        [encryptApiKey(t), maskApiKey(t), activeCfEmail]
+      );
+      activeCfKey = t;
+      const [cfDests, liveCatchAll] = await Promise.all([
+        listCloudflareDestinations({ token: t, authEmail: activeCfEmail }, accountId),
+        getCloudflareCatchAll({ token: t, authEmail: activeCfEmail }, zoneId),
+      ]);
+      if (liveCatchAll) {
+        resolvedPrimaryEmail = liveCatchAll;
+        liveCatchAllEmail = liveCatchAll;
+      }
+      for (const d of cfDests) {
+        const ex = mbs.find(
+          (m) => m.email.toLowerCase() === d.email.toLowerCase()
+        );
+        if (ex) {
+          ex.verified = d.verified;
+        } else {
+          mbs.push({
+            id: mbs.length + 10421,
+            email: d.email,
+            default: d.email === liveCatchAll,
+            verified: d.verified,
+          });
+        }
+      }
+      connectionMessage = `✅ تم ربط حساب Cloudflare بنجاح! الإيميل المستلم حالياً في Cloudflare هو: ${
+        liveCatchAll || resolvedPrimaryEmail
+      }`;
+    }
+
+    // Handle adding a new receiver email
+    if (
+      addReceiverEmail &&
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addReceiverEmail.trim())
+    ) {
+      const newEmail = addReceiverEmail.trim();
+      if (!activeCfKey) {
         return NextResponse.json(
           {
             error:
-              "A SimpleLogin API key is required for Live SimpleLogin API mode. Enter your key or switch to Sandbox mode.",
+              "يرجى ربط مفتاح Cloudflare Global API Key أولاً من زر إعدادات Cloudflare حتى يضيف الموقع هذا الإيميل في حسابك على Cloudflare ويرسل له رابط التفعيل!",
+            requireCloudflareKey: true,
           },
           { status: 400 }
         );
       }
 
-      try {
-        const client = new SimpleLoginClient(activeApiKey, resolvedBaseUrl);
-        const [userInfo, aliasOptions, mailboxesResp] = await Promise.all([
-          client.getUserInfo(),
-          client.getAliasOptions(),
-          client.getMailboxes(),
-        ]);
+      const { accountId, zoneId } = await findCloudflareZone(
+        { token: activeCfKey, authEmail: activeCfEmail },
+        "smsmraw.com"
+      );
+      const cfDest = await addCloudflareDestination(
+        { token: activeCfKey, authEmail: activeCfEmail },
+        accountId,
+        newEmail
+      );
 
-        const mailboxes: SimpleLoginMailbox[] =
-          mailboxesResp.mailboxes && mailboxesResp.mailboxes.length > 0
-            ? mailboxesResp.mailboxes
-            : [];
+      const existingIdx = mbs.findIndex(
+        (m) => m.email.toLowerCase() === newEmail.toLowerCase()
+      );
+      if (existingIdx >= 0) {
+        mbs[existingIdx].verified = cfDest.verified;
+      } else {
+        const nextId = mbs.reduce((max, m) => Math.max(max, m.id), 10420) + 1;
+        mbs.push({
+          id: nextId,
+          email: newEmail,
+          default: false,
+          verified: cfDest.verified,
+        });
+      }
 
-        // Match primary email to an existing mailbox or use default mailbox
-        let matchedMailbox = mailboxes.find(
-          (m) =>
-            resolvedPrimaryEmail &&
-            m.email.toLowerCase() === resolvedPrimaryEmail.toLowerCase()
+      if (cfDest.verified) {
+        await updateCloudflareCatchAll(
+          { token: activeCfKey, authEmail: activeCfEmail },
+          zoneId,
+          newEmail
         );
+        resolvedPrimaryEmail = newEmail;
+        liveCatchAllEmail = newEmail;
+        connectionMessage = `✅ الإيميل ${newEmail} مفعّل وتم تحويل استقبال كل رسائل الـ OTP إليه داخل Cloudflare!`;
+      } else {
+        connectionMessage = `📩 أرسل Cloudflare الآن رسالة تفعيل إلى بريد (${newEmail})! افتح تطبيق Gmail لهذا الإيميل واضغط Verify email address، ثم اضغط على الإيميل هنا للتبديل إليه.`;
+      }
+    }
 
-        if (!matchedMailbox && defaultMailboxId) {
-          matchedMailbox = mailboxes.find((m) => m.id === defaultMailboxId);
-        }
-        if (!matchedMailbox) {
-          matchedMailbox =
-            mailboxes.find((m) => m.default) || mailboxes[0] || undefined;
-        }
+    // Handle removing a receiver email
+    if (removeReceiverEmail) {
+      mbs = mbs.filter(
+        (m) => m.email.toLowerCase() !== removeReceiverEmail.trim().toLowerCase()
+      );
+      if (mbs.length === 0) {
+        mbs = [
+          {
+            id: 10421,
+            email: "mhmdsamy112233@gmail.com",
+            default: true,
+            verified: true,
+          },
+        ];
+      }
+      if (
+        resolvedPrimaryEmail.toLowerCase() ===
+        removeReceiverEmail.trim().toLowerCase()
+      ) {
+        resolvedPrimaryEmail = mbs[0].email;
+      }
+      connectionMessage = `تم حذف ${removeReceiverEmail} من القائمة.`;
+    }
 
-        if (!resolvedPrimaryEmail && matchedMailbox) {
-          resolvedPrimaryEmail = matchedMailbox.email;
-        }
-
-        const suffixes =
-          aliasOptions.suffixes && aliasOptions.suffixes.length > 0
-            ? aliasOptions.suffixes
-            : DEFAULT_SANDBOX_SUFFIXES;
-
-        const chosenSuffixObj =
-          suffixes.find((s) => s.suffix === defaultSuffix) || suffixes[0];
-
-        await dbQuery(
-          `UPDATE provider_settings
-           SET api_base_url = $1,
-               mode = 'live',
-               primary_email = $2,
-               default_mailbox_id = $3,
-               default_suffix = $4,
-               default_signed_suffix = $5,
-               account_name = $6,
-               account_email = $7,
-               is_premium = $8,
-               in_trial = $9,
-               max_alias_free_plan = $10,
-               can_create = $11,
-               available_suffixes = $12::jsonb,
-               available_mailboxes = $13::jsonb,
-               last_synced_at = NOW(),
-               updated_at = NOW()
-           WHERE id = 1`,
-          [
-            resolvedBaseUrl,
-            resolvedPrimaryEmail || userInfo.email,
-            matchedMailbox ? matchedMailbox.id : null,
-            chosenSuffixObj?.suffix || "@simplelogin.com",
-            chosenSuffixObj?.signed_suffix || null,
-            userInfo.name || "SimpleLogin Account",
-            userInfo.email,
-            Boolean(userInfo.is_premium),
-            Boolean(userInfo.in_trial),
-            Number(userInfo.max_alias_free_plan || 10),
-            Boolean(aliasOptions.can_create),
-            JSON.stringify(suffixes),
-            JSON.stringify(mailboxes),
-          ]
-        );
-
-        // Remove any old sandbox/demo aliases when connecting Live SimpleLogin API
-        await dbQuery("DELETE FROM aliases WHERE provider_mode = 'sandbox'");
-
-        liveVerified = true;
-        connectionMessage = `Connected to SimpleLogin as ${userInfo.email} (${
-          userInfo.is_premium
-            ? "Premium Plan"
-            : userInfo.in_trial
-            ? "Trial Plan"
-            : `Free Plan • Max ${userInfo.max_alias_free_plan || 10} aliases`
-        }).`;
-      } catch (err) {
-        const status =
-          err instanceof SimpleLoginApiError ? err.status : 502;
+    // Handle switching active OTP receiver email
+    if (switchActiveReceiver) {
+      const targetReceiver = switchActiveReceiver.trim();
+      if (!activeCfKey) {
         return NextResponse.json(
           {
             error:
-              err instanceof Error
-                ? err.message
-                : "Failed to authenticate with SimpleLogin API",
+              "لتبديل إيميل استقبال الـ OTP فعلياً داخل Cloudflare، يجب إدخال مفتاح Cloudflare Global API Key أولاً!",
+            requireCloudflareKey: true,
           },
-          { status: status >= 400 && status < 600 ? status : 502 }
+          { status: 400 }
         );
       }
-    } else {
-      // Sandbox / Local Provider Mode update
-      const currentMailboxes = [...current.clientSettings.availableMailboxes];
-      let targetMailboxId =
-        defaultMailboxId ?? current.clientSettings.defaultMailboxId ?? 10421;
 
-      if (resolvedPrimaryEmail) {
-        const existingMb = currentMailboxes.find(
-          (m) => m.email.toLowerCase() === resolvedPrimaryEmail.toLowerCase()
-        );
-        if (existingMb) {
-          targetMailboxId = existingMb.id;
-        } else {
-          // Update primary default mailbox or add it
-          const newId =
-            currentMailboxes.length > 0
-              ? Math.max(...currentMailboxes.map((m) => m.id)) + 1
-              : 10421;
-          currentMailboxes.unshift({
-            id: newId,
-            email: resolvedPrimaryEmail,
-            default: true,
-            verified: true,
-            nb_alias: 0,
-            creation_timestamp: Math.floor(Date.now() / 1000),
-          });
-          targetMailboxId = newId;
-        }
-      }
-
-      const suffixes =
-        current.clientSettings.availableSuffixes.length > 0
-          ? current.clientSettings.availableSuffixes
-          : DEFAULT_SANDBOX_SUFFIXES;
-      const chosenSuffixObj =
-        suffixes.find((s) => s.suffix === defaultSuffix) ||
-        suffixes.find(
-          (s) => s.suffix === current.clientSettings.defaultSuffix
-        ) ||
-        suffixes[0];
-
-      const isPremium =
-        typeof isPremiumPlanSim === "boolean"
-          ? isPremiumPlanSim
-          : current.clientSettings.isPremium;
-
-      await dbQuery(
-        `UPDATE provider_settings
-         SET api_base_url = $1,
-             mode = 'sandbox',
-             primary_email = $2,
-             default_mailbox_id = $3,
-             default_suffix = $4,
-             default_signed_suffix = $5,
-             is_premium = $6,
-             available_suffixes = $7::jsonb,
-             available_mailboxes = $8::jsonb,
-             updated_at = NOW()
-         WHERE id = 1`,
-        [
-          resolvedBaseUrl,
-          resolvedPrimaryEmail,
-          targetMailboxId,
-          chosenSuffixObj?.suffix || "@simplelogin.com",
-          chosenSuffixObj?.signed_suffix || null,
-          isPremium,
-          JSON.stringify(suffixes),
-          JSON.stringify(currentMailboxes),
-        ]
+      const { zoneId, accountId } = await findCloudflareZone(
+        { token: activeCfKey, authEmail: activeCfEmail },
+        "smsmraw.com"
       );
+      const cfDests = await listCloudflareDestinations(
+        { token: activeCfKey, authEmail: activeCfEmail },
+        accountId
+      );
+      const matchedDest = cfDests.find(
+        (d) => d.email.toLowerCase() === targetReceiver.toLowerCase()
+      );
+
+      if (!matchedDest) {
+        const added = await addCloudflareDestination(
+          { token: activeCfKey, authEmail: activeCfEmail },
+          accountId,
+          targetReceiver
+        );
+        if (!added.verified) {
+          return NextResponse.json(
+            {
+              error: `تم تسجيل ${targetReceiver} في Cloudflare وإرسال رسالة التفعيل إليه! افتح تطبيق Gmail الخاص بـ ${targetReceiver} واضغط على زر Verify email address أولاً، ثم اضغط هنا للتبديل إليه.`,
+            },
+            { status: 400 }
+          );
+        }
+      } else if (!matchedDest.verified) {
+        return NextResponse.json(
+          {
+            error: `الإيميل (${targetReceiver}) لم يتم تفعيله بعد! افتح تطبيق Gmail الخاص بـ ${targetReceiver} وابحث عن رسالة Cloudflare واضغط Verify email address أولاً.`,
+          },
+          { status: 400 }
+        );
+      }
+
+      await updateCloudflareCatchAll(
+        { token: activeCfKey, authEmail: activeCfEmail },
+        zoneId,
+        targetReceiver
+      );
+      resolvedPrimaryEmail = targetReceiver;
+      liveCatchAllEmail = targetReceiver;
+
+      mbs = mbs.map((m) => ({
+        ...m,
+        default: m.email.toLowerCase() === targetReceiver.toLowerCase(),
+        verified:
+          cfDests.find((d) => d.email.toLowerCase() === m.email.toLowerCase())
+            ?.verified ?? m.verified,
+      }));
+      if (
+        !mbs.some((m) => m.email.toLowerCase() === targetReceiver.toLowerCase())
+      ) {
+        const nextId = mbs.reduce((max, m) => Math.max(max, m.id), 10420) + 1;
+        mbs.push({
+          id: nextId,
+          email: targetReceiver,
+          default: true,
+          verified: true,
+        });
+      }
+
+      if (updateExistingAliasesToReceiver !== false) {
+        await dbQuery(
+          "UPDATE aliases SET primary_email = $1, updated_at = NOW() WHERE domain = 'smsmraw.com'",
+          [targetReceiver]
+        );
+      }
+      connectionMessage = `✅ تم التبديل فعلياً داخل Cloudflare! جميع أكواد الـ OTP المرسلة إلى @smsmraw.com تصل الآن إلى: ${targetReceiver}`;
     }
 
-    const updated = await getServerProviderSettings();
-    const stats = await getDashboardStats();
+    const matchedMb =
+      mbs.find(
+        (m) => m.email.toLowerCase() === resolvedPrimaryEmail.toLowerCase()
+      ) || mbs[0];
+    const suffixes = current.clientSettings.availableSuffixes.length
+      ? current.clientSettings.availableSuffixes
+      : DEFAULT_SANDBOX_SUFFIXES;
+    const chosen =
+      suffixes.find((s) => s.suffix === defaultSuffix) || suffixes[0];
 
-    return NextResponse.json({
+    await dbQuery(
+      `UPDATE provider_settings SET api_base_url=$1, mode=$2, primary_email=$3, default_mailbox_id=$4, default_suffix=$5, default_signed_suffix=$6, available_suffixes=$7::jsonb, available_mailboxes=$8::jsonb, updated_at=NOW() WHERE id=1`,
+      [
+        resolvedBaseUrl,
+        resolvedMode,
+        resolvedPrimaryEmail,
+        matchedMb?.id ?? 10421,
+        chosen.suffix,
+        chosen.signed_suffix,
+        JSON.stringify(suffixes),
+        JSON.stringify(mbs),
+      ]
+    );
+
+    const [updated, stats] = await Promise.all([
+      getServerProviderSettings(),
+      getDashboardStats(),
+    ]);
+    updated.clientSettings.primaryEmail = resolvedPrimaryEmail;
+    updated.clientSettings.cloudflareLiveCatchAll =
+      liveCatchAllEmail || (activeCfKey ? resolvedPrimaryEmail : null);
+    updated.clientSettings.cloudflareConnected = Boolean(activeCfKey);
+    updated.clientSettings.availableMailboxes = mbs;
+    updated.clientSettings.hasCloudflareKey = Boolean(activeCfKey);
+    updated.clientSettings.cloudflareKeyPreview = activeCfKey
+      ? maskApiKey(activeCfKey)
+      : null;
+
+    const res = NextResponse.json({
       settings: updated.clientSettings,
       stats,
-      liveVerified,
       message: connectionMessage,
     });
+    res.cookies.set(
+      VAULT_COOKIE_NAME,
+      serializeVaultCookie({
+        cfKey: activeCfKey,
+        cfEmail: activeCfEmail,
+        slKey: activeApiKey,
+        primaryEmail: resolvedPrimaryEmail,
+        mailboxes: mbs,
+      }),
+      {
+        httpOnly: true,
+        secure: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 90,
+      }
+    );
+    return res;
   } catch (err) {
     return NextResponse.json(
       {
         error:
-          err instanceof Error ? err.message : "Failed to update settings",
+          err instanceof Error ? err.message : "Failed to save settings",
       },
       { status: 500 }
     );

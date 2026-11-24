@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS generation_batches (
 
 CREATE TABLE IF NOT EXISTS aliases (
   id SERIAL PRIMARY KEY,
-  remote_alias_id INTEGER UNIQUE,
+  remote_alias_id INTEGER,
   email TEXT NOT NULL UNIQUE,
   prefix TEXT NOT NULL,
   domain TEXT NOT NULL,

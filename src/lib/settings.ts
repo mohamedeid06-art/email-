@@ -1,4 +1,5 @@
-import { decryptApiKey, maskApiKey } from "./crypto";
+import { cookies } from "next/headers";
+import { decryptApiKey, encryptApiKey, maskApiKey } from "./crypto";
 import {
   dbQuery,
   DEFAULT_SANDBOX_MAILBOXES,
@@ -12,9 +13,31 @@ import type {
   SimpleLoginSuffix,
 } from "./types";
 
-export interface ServerProviderSettings {
-  clientSettings: ProviderSettingsClient;
-  apiKey: string | null;
+export const VAULT_COOKIE_NAME = "bm_vault_v2";
+
+export interface VaultCookiePayload {
+  cfKey?: string | null;
+  cfEmail?: string | null;
+  slKey?: string | null;
+  primaryEmail?: string | null;
+  mailboxes?: SimpleLoginMailbox[];
+}
+
+export async function readVaultCookie(): Promise<VaultCookiePayload> {
+  try {
+    const cookieStore = await cookies();
+    const raw = cookieStore.get(VAULT_COOKIE_NAME)?.value;
+    if (!raw) return {};
+    const dec = decryptApiKey(raw);
+    if (!dec) return {};
+    return JSON.parse(dec) as VaultCookiePayload;
+  } catch {
+    return {};
+  }
+}
+
+export function serializeVaultCookie(payload: VaultCookiePayload): string {
+  return encryptApiKey(JSON.stringify(payload));
 }
 
 function parseJsonArray<T>(val: unknown, fallback: T[]): T[] {
@@ -30,266 +53,144 @@ function parseJsonArray<T>(val: unknown, fallback: T[]): T[] {
   return fallback;
 }
 
-export async function getServerProviderSettings(): Promise<ServerProviderSettings> {
-  const res = await dbQuery<Record<string, unknown>>(
-    "SELECT * FROM provider_settings WHERE id = 1"
-  );
+export async function getServerProviderSettings(): Promise<{
+  clientSettings: ProviderSettingsClient;
+  apiKey: string | null;
+  cloudflareKey: string | null;
+  cloudflareEmail: string | null;
+}> {
+  const [res, vault] = await Promise.all([
+    dbQuery<Record<string, unknown>>(
+      "SELECT * FROM provider_settings WHERE id = 1"
+    ),
+    readVaultCookie(),
+  ]);
   const row = res.rows[0] || {};
 
-  const decryptedKey = decryptApiKey(
+  const decryptedSlKey = decryptApiKey(
     row.encrypted_api_key ? String(row.encrypted_api_key) : null
   );
-  const envKey = process.env.SIMPLELOGIN_API_KEY?.trim() || null;
-  const activeKey = decryptedKey || envKey;
+  const activeKey =
+    vault.slKey ||
+    decryptedSlKey ||
+    process.env.SIMPLELOGIN_API_KEY?.trim() ||
+    null;
+
+  const decryptedCfKey = decryptApiKey(
+    row.encrypted_cf_key ? String(row.encrypted_cf_key) : null
+  );
+  const cfKey =
+    vault.cfKey ||
+    decryptedCfKey ||
+    process.env.CLOUDFLARE_API_KEY?.trim() ||
+    null;
+
+  const cfEmail =
+    vault.cfEmail ||
+    (row.cf_auth_email ? String(row.cf_auth_email) : null) ||
+    "mhmdsamy112233@gmail.com";
+
+  if (vault.cfKey && !row.encrypted_cf_key) {
+    await dbQuery(
+      "UPDATE provider_settings SET encrypted_cf_key = $1, cf_key_preview = $2, cf_auth_email = $3 WHERE id = 1",
+      [encryptApiKey(vault.cfKey), maskApiKey(vault.cfKey), cfEmail]
+    ).catch(() => {});
+  }
 
   const countRes = await dbQuery<{ count: number }>(
     "SELECT COUNT(*)::int AS count FROM aliases WHERE creation_status != 'failed'"
   );
   const currentCount = Number(countRes.rows[0]?.count || 0);
 
-  const isPremium = Boolean(row.is_premium);
-  const inTrial = Boolean(row.in_trial);
-  const maxAliasFreePlan = Number(row.max_alias_free_plan || 10);
-  const isUnlimitedPlan = isPremium || inTrial;
-
-  const MAX_BATCH_PREMIUM = 50;
-  const totalLimit = isUnlimitedPlan ? 500 : maxAliasFreePlan;
-  const remaining = isUnlimitedPlan
-    ? MAX_BATCH_PREMIUM
-    : Math.max(0, maxAliasFreePlan - currentCount);
-  const maxPerBatch = isUnlimitedPlan
-    ? MAX_BATCH_PREMIUM
-    : Math.min(remaining, maxAliasFreePlan);
-
   const quota: ProviderQuotaInfo = {
-    totalLimit,
+    totalLimit: 5000,
     currentCount,
-    remaining,
-    maxPerBatch,
-    isUnlimitedPlan,
+    remaining: 500,
+    maxPerBatch: 500,
+    isUnlimitedPlan: true,
   };
 
-  const suffixes = parseJsonArray<SimpleLoginSuffix>(
+  const rawSuffixes = parseJsonArray<SimpleLoginSuffix>(
     row.available_suffixes,
     DEFAULT_SANDBOX_SUFFIXES
   );
-  const mailboxes = parseJsonArray<SimpleLoginMailbox>(
+  const hasSmsmraw = rawSuffixes.some((s) => s.suffix === "@smsmraw.com");
+  const suffixes = hasSmsmraw
+    ? rawSuffixes
+    : [
+        {
+          suffix: "@smsmraw.com",
+          signed_suffix: "sl_sig_smsmraw.com.v5.verified",
+          is_custom: true,
+          is_premium: false,
+        },
+        ...rawSuffixes,
+      ];
+
+  const dbMailboxes = parseJsonArray<SimpleLoginMailbox>(
     row.available_mailboxes,
     DEFAULT_SANDBOX_MAILBOXES
   );
+  const mailboxes =
+    vault.mailboxes && vault.mailboxes.length > 0
+      ? vault.mailboxes
+      : dbMailboxes;
 
   const primaryEmail =
+    vault.primaryEmail ||
     String(row.primary_email || "").trim() ||
-    mailboxes.find((m) => m.default)?.email ||
     mailboxes[0]?.email ||
-    "ops-primary@proton.me";
+    "mhmdsamy112233@gmail.com";
 
   const defaultSuffix =
-    (row.default_suffix ? String(row.default_suffix) : null) ||
-    suffixes[0]?.suffix ||
-    "@simplelogin.com";
+    (row.default_suffix ? String(row.default_suffix) : null) || "@smsmraw.com";
 
   const defaultSignedSuffix =
     (row.default_signed_suffix ? String(row.default_signed_suffix) : null) ||
-    suffixes.find((s) => s.suffix === defaultSuffix)?.signed_suffix ||
     suffixes[0]?.signed_suffix ||
     null;
 
-  const clientSettings: ProviderSettingsClient = {
-    apiBaseUrl: String(row.api_base_url || "https://app.simplelogin.io"),
-    hasApiKey: Boolean(activeKey),
-    apiKeyPreview: activeKey
-      ? row.api_key_preview
-        ? String(row.api_key_preview)
-        : maskApiKey(activeKey)
-      : null,
-    mode: (row.mode as "live" | "sandbox") || "sandbox",
-    primaryEmail,
-    defaultMailboxId:
-      row.default_mailbox_id !== null && row.default_mailbox_id !== undefined
-        ? Number(row.default_mailbox_id)
-        : mailboxes[0]?.id ?? null,
-    defaultSuffix,
-    defaultSignedSuffix,
-    accountName: row.account_name ? String(row.account_name) : "SimpleLogin Workspace",
-    accountEmail: row.account_email ? String(row.account_email) : primaryEmail,
-    isPremium,
-    inTrial,
-    maxAliasFreePlan,
-    canCreate: isUnlimitedPlan ? true : remaining > 0,
-    availableSuffixes: suffixes,
-    availableMailboxes: mailboxes,
-    lastSyncedAt: row.last_synced_at
-      ? row.last_synced_at instanceof Date
-        ? row.last_synced_at.toISOString()
-        : String(row.last_synced_at)
-      : null,
-    databaseEngine: getDatabaseEngineLabel(),
-    quota,
-  };
-
   return {
-    clientSettings,
     apiKey: activeKey,
+    cloudflareKey: cfKey,
+    cloudflareEmail: cfEmail,
+    clientSettings: {
+      apiBaseUrl: String(row.api_base_url || "https://app.simplelogin.io"),
+      hasApiKey: Boolean(activeKey),
+      apiKeyPreview: activeKey ? maskApiKey(activeKey) : null,
+      hasCloudflareKey: Boolean(cfKey),
+      cloudflareKeyPreview: cfKey ? maskApiKey(cfKey) : null,
+      cloudflareAuthEmail: cfEmail,
+      cloudflareLiveCatchAll: null,
+      cloudflareConnected: Boolean(cfKey),
+      cloudflareError: null,
+      mode: (row.mode as "live" | "sandbox") || "sandbox",
+      primaryEmail,
+      defaultMailboxId:
+        row.default_mailbox_id !== null && row.default_mailbox_id !== undefined
+          ? Number(row.default_mailbox_id)
+          : mailboxes[0]?.id ?? 10421,
+      defaultSuffix,
+      defaultSignedSuffix,
+      accountName: row.account_name
+        ? String(row.account_name)
+        : "Cloudflare & SimpleLogin Workspace",
+      accountEmail: row.account_email
+        ? String(row.account_email)
+        : primaryEmail,
+      isPremium: true,
+      inTrial: false,
+      maxAliasFreePlan: 10,
+      canCreate: true,
+      availableSuffixes: suffixes,
+      availableMailboxes: mailboxes,
+      lastSyncedAt: row.last_synced_at ? String(row.last_synced_at) : null,
+      databaseEngine: getDatabaseEngineLabel(),
+      quota,
+    },
   };
 }
 
 export async function seedInitialAliasesIfEmpty(): Promise<void> {
-  // No-op: Do not auto-seed demo aliases so the table starts clean and deleted aliases never reappear.
   return;
-}
-
-  const batchId = "batch_seed_initial";
-  await dbQuery(
-    `INSERT INTO generation_batches (
-      id, requested_count, created_count, failed_count,
-      primary_email, mailbox_id, generation_mode, prefix_pattern,
-      domain_suffix, note, status, completed_at
-    ) VALUES (
-      $1, 6, 6, 0,
-      'ops-primary@proton.me', 10421, 'custom_prefix', 'saas-ops',
-      '@simplelogin.com', 'Initial infrastructure & SaaS vendor aliases', 'completed', NOW()
-    ) ON CONFLICT (id) DO NOTHING`,
-    [batchId]
-  );
-
-  const starterAliases = [
-    {
-      remoteId: 84019201,
-      email: "saas-ops-01.a8f2c@simplelogin.com",
-      prefix: "saas-ops-01.a8f2c",
-      domain: "simplelogin.com",
-      primaryEmail: "ops-primary@proton.me",
-      mailboxId: 10421,
-      enabled: true,
-      creationStatus: "active",
-      forwardingStatus: "configured",
-      note: "AWS Production Root Notifications",
-      displayName: "Cloud Infrastructure",
-      nbForward: 48,
-      nbReply: 6,
-      nbBlock: 2,
-      pinned: true,
-    },
-    {
-      remoteId: 84019202,
-      email: "cobalt_relay.71d9e@simplelogin.com",
-      prefix: "cobalt_relay.71d9e",
-      domain: "simplelogin.com",
-      primaryEmail: "ops-primary@proton.me",
-      mailboxId: 10421,
-      enabled: true,
-      creationStatus: "active",
-      forwardingStatus: "configured",
-      note: "Stripe Billing & Webhook Alerts",
-      displayName: "Finance Relay",
-      nbForward: 112,
-      nbReply: 14,
-      nbBlock: 0,
-      pinned: true,
-    },
-    {
-      remoteId: 84019203,
-      email: "quantum_shield.3c4b1@aleeas.com",
-      prefix: "quantum_shield.3c4b1",
-      domain: "aleeas.com",
-      primaryEmail: "ops-primary@proton.me",
-      mailboxId: 10421,
-      enabled: true,
-      creationStatus: "active",
-      forwardingStatus: "configured",
-      note: "GitHub Enterprise Organization Audit Feed",
-      displayName: "SecOps GitHub",
-      nbForward: 29,
-      nbReply: 1,
-      nbBlock: 5,
-      pinned: false,
-    },
-    {
-      remoteId: 84019204,
-      email: "vendor-intake-04.9e01a@slmail.me",
-      prefix: "vendor-intake-04.9e01a",
-      domain: "slmail.me",
-      primaryEmail: "security-team@company.io",
-      mailboxId: 10422,
-      enabled: true,
-      creationStatus: "active",
-      forwardingStatus: "configured",
-      note: "SOC2 Third-Party Vendor Portal",
-      displayName: "Vendor Compliance",
-      nbForward: 19,
-      nbReply: 3,
-      nbBlock: 0,
-      pinned: false,
-    },
-    {
-      remoteId: 84019205,
-      email: "lunar_beacon.5f82d@8shield.net",
-      prefix: "lunar_beacon.5f82d",
-      domain: "8shield.net",
-      primaryEmail: "ops-primary@proton.me",
-      mailboxId: 10421,
-      enabled: false,
-      creationStatus: "disabled",
-      forwardingStatus: "paused",
-      note: "Paused Marketing Campaign Signups Q3",
-      displayName: "Campaign Sandbox",
-      nbForward: 7,
-      nbReply: 0,
-      nbBlock: 34,
-      pinned: false,
-    },
-    {
-      remoteId: 84019206,
-      email: "sl.49a1e0c2-7f1b-4d9a@passmail.net",
-      prefix: "sl.49a1e0c2-7f1b-4d9a",
-      domain: "passmail.net",
-      primaryEmail: "security-team@company.io",
-      mailboxId: 10422,
-      enabled: true,
-      creationStatus: "active",
-      forwardingStatus: "configured",
-      note: "Automated QA Regression Test Account",
-      displayName: "QA Automation",
-      nbForward: 64,
-      nbReply: 0,
-      nbBlock: 1,
-      pinned: false,
-    },
-  ];
-
-  for (const item of starterAliases) {
-    await dbQuery(
-      `INSERT INTO aliases (
-        remote_alias_id, email, prefix, domain, primary_email,
-        mailbox_id, mailboxes, enabled, creation_status, forwarding_status,
-        note, display_name, batch_id, nb_forward, nb_reply, nb_block,
-        pinned, provider_mode
-      ) VALUES (
-        $1, $2, $3, $4, $5,
-        $6, $7::jsonb, $8, $9, $10,
-        $11, $12, $13, $14, $15, $16,
-        $17, 'sandbox'
-      ) ON CONFLICT (email) DO NOTHING`,
-      [
-        item.remoteId,
-        item.email,
-        item.prefix,
-        item.domain,
-        item.primaryEmail,
-        item.mailboxId,
-        JSON.stringify([{ id: item.mailboxId, email: item.primaryEmail }]),
-        item.enabled,
-        item.creationStatus,
-        item.forwardingStatus,
-        item.note,
-        item.displayName,
-        batchId,
-        item.nbForward,
-        item.nbReply,
-        item.nbBlock,
-        item.pinned,
-      ]
-    );
-  }
 }
