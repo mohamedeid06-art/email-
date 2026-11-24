@@ -1,5 +1,5 @@
 @import "tailwindcss";
-@import url("https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
 
 :root {
   --font-cairo: "Cairo", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -12,10 +12,36 @@
 
 html,
 body {
-  background-color: #070b14;
+  background-color: #050811;
   color: #f8fafc;
   font-family: var(--font-cairo);
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+.bg-enterprise-mesh {
+  background-color: #050811;
+  background-image: 
+    radial-gradient(at 15% 0%, rgba(16, 185, 129, 0.11) 0px, transparent 45%),
+    radial-gradient(at 85% 5%, rgba(99, 102, 241, 0.11) 0px, transparent 45%),
+    radial-gradient(at 50% 100%, rgba(14, 165, 233, 0.06) 0px, transparent 50%),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(to right, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 100% 100%, 40px 40px, 40px 40px;
+}
+
+.glass-panel {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.78) 0%, rgba(9, 14, 26, 0.9) 100%);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 20px 50px -15px rgba(0, 0, 0, 0.6), inset 0 1px 0 0 rgba(255, 255, 255, 0.07);
+}
+
+.glass-card-emerald {
+  background: linear-gradient(135deg, rgba(6, 78, 59, 0.32) 0%, rgba(12, 19, 34, 0.92) 55%, rgba(9, 14, 26, 0.96) 100%);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  box-shadow: 0 20px 50px -15px rgba(16, 185, 129, 0.15), inset 0 1px 0 0 rgba(52, 211, 153, 0.2);
 }
 
 code,
@@ -29,15 +55,19 @@ code,
 }
 
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #070b14;
+  background: #050811;
 }
 
 ::-webkit-scrollbar-thumb {
   background: #1e293b;
   border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
 }
