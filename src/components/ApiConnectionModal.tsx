@@ -6,6 +6,8 @@ import {
   Cloud,
   Database,
   ExternalLink,
+  Eye,
+  EyeOff,
   Loader2,
   Lock,
   Mail,
@@ -29,6 +31,7 @@ export function ApiConnectionModal({
   onUpdated,
 }: ApiConnectionModalProps) {
   const [cfKeyInput, setCfKeyInput] = useState("");
+  const [showKey, setShowKey] = useState(false);
   const [cfEmailInput, setCfEmailInput] = useState(
     settings.cloudflareAuthEmail || "mhmdsamy112233@gmail.com"
   );
@@ -43,7 +46,25 @@ export function ApiConnectionModal({
 
   if (!isOpen) return null;
 
+  const trimmedKey = cfKeyInput.trim();
+  const isHex37 = /^[a-f0-9]{32,40}$/i.test(trimmedKey);
+
   async function handleSave() {
+    if (trimmedKey) {
+      if (trimmedKey.startsWith("vcp_")) {
+        setError(
+          "⚠️ المفتاح الذي لصقته يبدأ بـ (vcp_) وهو مفتاح منصة Vercel الذي نسخته سابقاً وليس مفتاح Cloudflare! افتح صفحة Cloudflare واضغط View أمام Global API Key."
+        );
+        return;
+      }
+      if (trimmedKey.startsWith("v1.0-")) {
+        setError(
+          "⚠️ المفتاح الذي لصقته يبدأ بـ (v1.0-) وهو مفتاح (Origin CA Key)! في صفحة Cloudflare اضغط View أمام السطر الأول (Global API Key) المكون من 37 حرفاً ورقماً."
+        );
+        return;
+      }
+    }
+
     setLoading(true);
     setError(null);
     try {
@@ -51,7 +72,7 @@ export function ApiConnectionModal({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          cloudflareKey: cfKeyInput.trim() || undefined,
+          cloudflareKey: trimmedKey || undefined,
           cloudflareAuthEmail: cfEmailInput.trim() || undefined,
           primaryEmail: primaryEmail.trim(),
           defaultSuffix: defaultSuffix.trim(),
@@ -87,12 +108,17 @@ export function ApiConnectionModal({
       });
       const data = await res.json();
       if (res.ok) {
-        onUpdated(data.settings, "تم مسح مفتاح Cloudflare من السيرفر.");
+        onUpdated(data.settings, "تم مسح مفتاح Cloudflare القديم.");
       }
     } finally {
       setLoading(false);
     }
   }
+
+  const isValidSavedKey =
+    settings.hasCloudflareKey &&
+    settings.cloudflareConnected &&
+    !settings.cloudflareKeyPreview?.startsWith("cfk_");
 
   return (
     <div
@@ -111,7 +137,7 @@ export function ApiConnectionModal({
                 إعدادات ربط Cloudflare وتبديل إيميل الـ OTP
               </h2>
               <p className="text-xs text-slate-400">
-                اربط مفتاح Cloudflare مرة واحدة لتبديل الإيميل المستلم للـ OTP بضغطة زر
+                اربط مفتاح Global API Key مرة واحدة لتبديل الإيميل المستلم للـ OTP بضغطة زر
               </p>
             </div>
           </div>
@@ -127,7 +153,7 @@ export function ApiConnectionModal({
         <div className="space-y-4 p-6">
           {error ? (
             <div className="rounded-xl border border-rose-500/40 bg-rose-500/15 px-4 py-3 text-xs font-medium leading-relaxed text-rose-200">
-              ⚠️ {error}
+              {error}
             </div>
           ) : null}
 
@@ -137,7 +163,7 @@ export function ApiConnectionModal({
                 <Lock className="h-4 w-4 text-amber-400" />
                 مفتاح Cloudflare Global API Key (لدومين @smsmraw.com)
               </span>
-              {settings.hasCloudflareKey ? (
+              {isValidSavedKey ? (
                 <span
                   dir="ltr"
                   className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2.5 py-0.5 font-mono text-[11px] text-emerald-300"
@@ -146,17 +172,17 @@ export function ApiConnectionModal({
                 </span>
               ) : (
                 <span className="rounded-full border border-rose-500/40 bg-rose-500/15 px-2.5 py-0.5 text-[11px] font-bold text-rose-300">
-                  غير متصل بعد
+                  يحتاج لصق Global API Key الصحيح
                 </span>
               )}
             </div>
 
             <div className="space-y-1.5 rounded-xl border border-white/10 bg-[#070B14] p-3.5 text-xs leading-relaxed text-slate-300">
               <div className="font-semibold text-white">
-                كيف تحصل على المفتاح في 15 ثانية؟
+                كيف تحصل على المفتاح الصحيح (37 حرفاً ورقماً)؟
               </div>
               <div>
-                1. اضغط هنا لفتح صفحة المفاتيح في حسابك:{" "}
+                1. افتح صفحة المفاتيح في حسابك:{" "}
                 <a
                   href="https://dash.cloudflare.com/profile/api-tokens"
                   target="_blank"
@@ -167,12 +193,12 @@ export function ApiConnectionModal({
                 </a>
               </div>
               <div>
-                2. انزل لآخر الصفحة عند قسم <strong>API Keys</strong> واضغط على زر{" "}
-                <strong>View</strong> أمام <strong>Global API Key</strong>.
+                2. انزل لآخر الصفحة عند جدول <strong>API Keys</strong> واضغط على زر{" "}
+                <strong>View</strong> أمام السطر الأول <strong>Global API Key</strong>{" "}
+                <span className="text-rose-300">(وليس Origin CA Key)</span>.
               </div>
               <div>
-                3. انسخ الكود والصقه في الخانة بالأسفل ثم اضغط{" "}
-                <strong>حفظ وربط Cloudflare</strong>:
+                3. انسخ الكود المكون من <strong>37 حرفاً ورقماً</strong> والصقه بالأسفل:
               </div>
             </div>
 
@@ -192,27 +218,50 @@ export function ApiConnectionModal({
               </div>
 
               <div>
-                <label className="mb-1 block text-xs font-medium text-slate-300">
-                  مفتاح Cloudflare Global API Key
-                </label>
+                <div className="mb-1 flex items-center justify-between">
+                  <label className="block text-xs font-medium text-slate-300">
+                    مفتاح Cloudflare Global API Key
+                  </label>
+                  {trimmedKey ? (
+                    <span
+                      className={`text-[11px] font-bold ${
+                        isHex37 ? "text-emerald-400" : "text-amber-300"
+                      }`}
+                    >
+                      {isHex37
+                        ? `✓ صيغة Global API Key صحيحة (${trimmedKey.length} حرفاً)`
+                        : `طول النص الملصوق: ${trimmedKey.length} حرفاً (اضغط 👁️ للتأكد منه)`}
+                    </span>
+                  ) : null}
+                </div>
                 <div className="flex gap-2">
-                  <input
-                    dir="ltr"
-                    type="password"
-                    value={cfKeyInput}
-                    onChange={(e) => setCfKeyInput(e.target.value)}
-                    placeholder={
-                      settings.hasCloudflareKey
-                        ? "المفتاح محفوظ بالفعل — الصق هنا فقط إذا أردت تغييره..."
-                        : "الصق الـ Global API Key هنا..."
-                    }
-                    className="w-full rounded-xl border border-amber-500/40 bg-[#0C1220] px-3.5 py-2.5 text-left font-mono text-xs text-white focus:border-amber-400 focus:outline-none"
-                  />
+                  <div className="relative flex-1">
+                    <input
+                      dir="ltr"
+                      type={showKey ? "text" : "password"}
+                      value={cfKeyInput}
+                      onChange={(e) => setCfKeyInput(e.target.value)}
+                      placeholder="الصق الـ Global API Key هنا (37 حرفاً ورقماً)..."
+                      className="w-full rounded-xl border border-amber-500/40 bg-[#0C1220] py-2.5 pl-3.5 pr-10 text-left font-mono text-xs text-white focus:border-amber-400 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowKey((prev) => !prev)}
+                      title={showKey ? "إخفاء المفتاح" : "إظهار المفتاح للتأكد منه"}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-lg p-1 text-slate-400 hover:bg-white/10 hover:text-white"
+                    >
+                      {showKey ? (
+                        <EyeOff className="h-4 w-4" />
+                      ) : (
+                        <Eye className="h-4 w-4" />
+                      )}
+                    </button>
+                  </div>
                   {settings.hasCloudflareKey ? (
                     <button
                       type="button"
                       onClick={handleClearCfKey}
-                      title="حذف المفتاح"
+                      title="حذف المفتاح المحفوظ"
                       className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 text-rose-300 hover:bg-rose-500/20"
                     >
                       <Trash2 className="h-4 w-4" />
@@ -253,7 +302,7 @@ export function ApiConnectionModal({
             </div>
           </div>
 
-          <div className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-[#070A12] px-4 py-2.5 text-[11px] text-slate-400">
+          <div className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-2.5 text-[11px] text-slate-400">
             <span className="flex items-center gap-1.5">
               <Database className="h-3.5 w-3.5 text-cyan-400" />
               {settings.databaseEngine}
@@ -266,11 +315,11 @@ export function ApiConnectionModal({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-3 border-t border-white/[0.08] bg-[#080C15] px-6 py-4">
+        <div className="flex items-center justify-end gap-2.5 border-t border-white/[0.08] bg-white/[0.01] px-6 py-4">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-xl border border-white/10 px-4 py-2 text-xs font-medium text-slate-300 hover:bg-white/5"
+            className="rounded-xl border border-white/10 px-4 py-2.5 text-xs font-medium text-slate-300 hover:bg-white/5"
           >
             إغلاق
           </button>
@@ -278,14 +327,14 @@ export function ApiConnectionModal({
             type="button"
             disabled={loading}
             onClick={handleSave}
-            className="inline-flex items-center gap-2 rounded-xl bg-amber-500 px-5 py-2.5 text-xs font-bold text-black shadow-lg transition hover:bg-amber-400 disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded-xl bg-amber-500 px-5 py-2.5 text-xs font-bold text-slate-950 shadow-lg shadow-amber-500/20 hover:bg-amber-400 disabled:opacity-50"
           >
             {loading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <CheckCircle2 className="h-4 w-4" />
             )}
-            حفظ وربط Cloudflare الآن
+            <span>حفظ وربط Cloudflare الآن</span>
           </button>
         </div>
       </div>

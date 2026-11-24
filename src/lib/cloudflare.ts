@@ -3,10 +3,7 @@ export interface CloudflareAuth {
   authEmail?: string | null;
 }
 
-// Cache zoneId and accountId per domain so we don't re-query /zones on every action
 const zoneCache = new Map<string, { zoneId: string; accountId: string; cachedAt: number }>();
-
-// Cooldown tracker if Cloudflare returns an auth lockout (429 / code 10000 / Too many authentication failures)
 let authLockoutUntil = 0;
 
 export function isCloudflareAuthLocked(): boolean {
@@ -17,21 +14,43 @@ export function clearCloudflareAuthLockout(): void {
   authLockoutUntil = 0;
 }
 
-function formatCloudflareError(rawMessage: string | undefined, fallbackArabic: string): string {
+export function validateCloudflareKeyFormat(rawKey: string): string | null {
+  const t = rawKey.trim().replace(/^Bearer\s+/i, "").trim();
+  if (!t) return "يرجى لصق مفتاح Cloudflare Global API Key أولاً.";
+  if (t.startsWith("vcp_")) {
+    return "⚠️ المفتاح الذي لصقته يبدأ بـ (vcp_) وهو مفتاح منصة Vercel الذي نسخته سابقاً وليس مفتاح Cloudflare! افتح صفحة Cloudflare واضغط View أمام Global API Key لنسخ المفتاح الصحيح.";
+  }
+  if (t.startsWith("v1.0-")) {
+    return "⚠️ المفتاح الذي لصقته يبدأ بـ (v1.0-) وهو مفتاح (Origin CA Key) وليس (Global API Key)! في صفحة Cloudflare اضغط View أمام السطر الأول (Global API Key) المكون من 37 حرفاً ورقماً.";
+  }
+  if (t.startsWith("cfk_")) {
+    return "⚠️ المفتاح الذي يبدأ بـ (cfk_) هو مفتاح تجريبي غير حقيقي. يرجى نسخ مفتاح Global API Key الحقيقي من حسابك في Cloudflare (يتكون من 37 حرفاً ورقماً).";
+  }
+  return null;
+}
+
+function formatCloudflareError(rawMessage: string | undefined, rawToken: string, fallbackArabic: string): string {
+  const formatWarning = validateCloudflareKeyFormat(rawToken);
+  if (formatWarning) return formatWarning;
+
   if (!rawMessage) return fallbackArabic;
   const lower = rawMessage.toLowerCase();
   if (lower.includes("too many authentication failures")) {
     authLockoutUntil = Date.now() + 60_000;
-    return "⏳ حظر مؤقت من Cloudflare لمدة دقائق بسبب محاولات مفتاح API سابقة غير صحيحة. انتظر 3 إلى 5 دقائق بدون الضغط، ثم افتح (إعدادات Cloudflare) وتأكد من لصق الـ Global API Key الصحيح.";
+    return "⏳ حظر مؤقت من Cloudflare لمدة دقائق بسبب محاولات مفتاح API سابقة غير صحيحة. انتظر 3 دقائق ثم الصق الـ Global API Key الصحيح.";
+  }
+  if (lower.includes("invalid access token")) {
+    return `❌ المفتاح الذي لصقته (${rawToken.trim().length} حرفاً) ليس مفتاح Global API Key صالحاً! مفتاح Global API Key في Cloudflare يتكون دائماً من 37 حرفاً ورقماً فقط (a-f و 0-9) بدون شرطات. اضغط على أيقونة العين 👁️ للتأكد مما لصقته.`;
   }
   if (
     lower.includes("unable to authenticate") ||
     lower.includes("invalid x-auth-key") ||
     lower.includes("invalid api token") ||
-    lower.includes("authentication error")
+    lower.includes("authentication error") ||
+    lower.includes("invalid format for x-auth-key")
   ) {
     authLockoutUntil = Date.now() + 30_000;
-    return "❌ مفتاح Cloudflare أو إيميل الحساب غير صحيح. افتح (إعدادات Cloudflare) وتأكد من نسخ Global API Key (من قسم API Keys -> Global API Key -> View) مع إيميل حسابك في Cloudflare.";
+    return "❌ مفتاح Cloudflare أو إيميل الحساب غير مطابقين. تأكد من كتابة نفس الإيميل المسجل به في Cloudflare ولصق الـ Global API Key (المكون من 37 حرفاً ورقماً).";
   }
   if (lower.includes("not verified") || lower.includes("destination address")) {
     return "⏳ هذا الإيميل لم يتم تفعيله في Cloudflare بعد! افتح صندوق البريد (Gmail) لهذا الإيميل واضغط على زر Verify email address في رسالة Cloudflare أولاً.";
@@ -43,9 +62,11 @@ async function cfFetch(url: string, auth: CloudflareAuth, init: RequestInit = {}
   const t = auth.token.trim().replace(/^Bearer\s+/i, "").trim();
   const email = (auth.authEmail || "mhmdsamy112233@gmail.com").trim();
 
-  // Global API Key in Cloudflare is always a 32-40 char hexadecimal string.
-  // API Tokens contain G-Z, _, or -. Never send the wrong header type, because
-  // sending a Global Key as Bearer (or an API Token as X-Auth-Key) counts as a failed auth attempt in Cloudflare!
+  const preCheckError = validateCloudflareKeyFormat(t);
+  if (preCheckError) {
+    return { ok: false, status: 400, data: {}, errorMessage: preCheckError };
+  }
+
   const isHexGlobalKey = /^[a-f0-9]{32,40}$/i.test(t);
 
   const authHeaders: Record<string, string> = isHexGlobalKey
@@ -83,9 +104,9 @@ export async function findCloudflareZone(
   domain = "smsmraw.com"
 ): Promise<{ zoneId: string; accountId: string }> {
   const cleanDomain = domain.replace(/^@/, "").trim().toLowerCase();
-  const cached = zoneCache.get(cleanDomain);
-  if (cached && Date.now() - cached.cachedAt < 1000 * 60 * 30) {
-    return { zoneId: cached.zoneId, accountId: cached.accountId };
+  const preCheckError = validateCloudflareKeyFormat(auth.token);
+  if (preCheckError) {
+    throw new Error(preCheckError);
   }
 
   const { ok, data, errorMessage } = await cfFetch(
@@ -97,6 +118,7 @@ export async function findCloudflareZone(
     throw new Error(
       formatCloudflareError(
         errorMessage,
+        auth.token,
         `تعذر الوصول لدومين ${cleanDomain} في Cloudflare. تأكد من صحة الـ Global API Key وإيميل حساب Cloudflare.`
       )
     );
@@ -147,6 +169,7 @@ export async function addCloudflareDestination(
     throw new Error(
       formatCloudflareError(
         errorMessage,
+        auth.token,
         "تعذر إضافة الإيميل في Cloudflare Destination Addresses."
       )
     );
@@ -195,6 +218,7 @@ export async function updateCloudflareCatchAll(
     throw new Error(
       formatCloudflareError(
         errorMessage,
+        auth.token,
         "رفض Cloudflare تبديل الإيميل — تأكد من فتح Gmail للإيميل الجديد والضغط على رسالة التفعيل Verify من Cloudflare أولاً!"
       )
     );
