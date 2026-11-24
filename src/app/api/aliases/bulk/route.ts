@@ -4,7 +4,7 @@ import { getServerProviderSettings } from "@/lib/settings";
 
 export async function POST(req: NextRequest) {
   try {
-    const { ids, action, primaryEmail } = (await req.json()) as {
+    const { ids, action, primaryEmail, backupAliases } = (await req.json()) as {
       ids?: number[];
       action:
         | "enable"
@@ -14,9 +14,57 @@ export async function POST(req: NextRequest) {
         | "clear_used"
         | "mark_used"
         | "mark_unused"
-        | "switch_receiver";
+        | "switch_receiver"
+        | "restore_backup";
       primaryEmail?: string;
+      backupAliases?: Array<{
+        email: string;
+        prefix: string;
+        domain: string;
+        primaryEmail: string;
+        isUsed?: boolean;
+        note?: string;
+      }>;
     };
+
+    if (action === "restore_backup" && Array.isArray(backupAliases) && backupAliases.length > 0) {
+      for (const item of backupAliases.slice(0, 500)) {
+        if (!item.email || !item.email.includes("@")) continue;
+        const [p, d] = item.email.split("@");
+        await dbQuery(
+          `INSERT INTO aliases (
+            email, prefix, domain, primary_email, mailbox_id,
+            mailboxes, enabled, is_used, creation_status, forwarding_status,
+            note, display_name, provider_mode
+          ) VALUES (
+            $1, $2, $3, $4, 10421,
+            $5::jsonb, TRUE, $6, 'active', 'configured',
+            $7, '', 'sandbox'
+          ) ON CONFLICT (email) DO UPDATE SET
+            is_used = EXCLUDED.is_used,
+            primary_email = EXCLUDED.primary_email`,
+          [
+            item.email,
+            item.prefix || p,
+            item.domain || d || "smsmraw.com",
+            item.primaryEmail || "mhmdsamy112233@gmail.com",
+            JSON.stringify([{ id: 10421, email: item.primaryEmail || "mhmdsamy112233@gmail.com" }]),
+            Boolean(item.isUsed),
+            item.note || "",
+          ]
+        );
+      }
+      const [stats, updated] = await Promise.all([
+        getDashboardStats(),
+        getServerProviderSettings(),
+      ]);
+      return NextResponse.json({
+        processedCount: backupAliases.length,
+        errors: [],
+        stats,
+        settings: updated.clientSettings,
+      });
+    }
 
     if (action === "clear_all") {
       await dbQuery("DELETE FROM aliases");
